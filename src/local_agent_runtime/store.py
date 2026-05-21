@@ -186,6 +186,7 @@ class SqliteRuntimeStore:
         params: list[Any] = []
         clause = ""
         if task_id:
+            self.get_task(task_id)
             clause = "WHERE task_id = ?"
             params.append(task_id)
         suffix = "ORDER BY id ASC"
