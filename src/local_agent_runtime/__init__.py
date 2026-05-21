@@ -7,6 +7,8 @@ from .sessions import FakeSessionManager, SessionManager, TmuxSessionManager
 from .store import SqliteRuntimeStore
 from .workspaces import DirectoryWorkspaceManager, GitWorktreeWorkspaceManager
 
+__version__ = "0.1.0"
+
 __all__ = [
     "AgentTaskRuntime",
     "DirectoryWorkspaceManager",
@@ -22,4 +24,5 @@ __all__ = [
     "TaskStatus",
     "TmuxSessionManager",
     "WorkerSpec",
+    "__version__",
 ]

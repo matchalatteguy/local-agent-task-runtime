@@ -28,6 +28,7 @@ Prerequisites:
 
 ```bash
 uv sync
+uv run agent-runtime --version
 uv run pytest
 uv run ruff check .
 ```

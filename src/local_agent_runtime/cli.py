@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import __version__
 from .dispatch import Dispatcher
 from .models import TaskStatus
 from .runtime import AgentTaskRuntime
@@ -15,6 +16,7 @@ from .workspaces import DirectoryWorkspaceManager
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-runtime")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--db", default=".agent-runtime/runtime.sqlite3", help="SQLite runtime path"
     )

@@ -4,15 +4,18 @@ version = "0.1.0"
 description = "A local-first SQLite runtime for coordinating durable agent and script tasks."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Local Agent Task Runtime contributors" }]
 keywords = ["agents", "sqlite", "task-runner", "tmux", "local-first"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
 ]
 dependencies = []
 

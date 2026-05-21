@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from local_agent_runtime.cli import main
+
+
+def test_cli_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--version"])
+    assert exc_info.value.code == 0
+    assert "agent-runtime 0.1.0" in capsys.readouterr().out
 
 
 def test_cli_register_list_events_summary(tmp_path, capsys):
