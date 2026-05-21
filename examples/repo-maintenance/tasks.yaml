@@ -1,0 +1,13 @@
+tasks:
+  - id: docs-quickstart
+    role: docs
+    command: python scripts/write_docs.py
+    workspace: workspaces/docs-quickstart
+  - id: tests-fixtures
+    role: tests
+    command: python scripts/refresh_fixtures.py
+    workspace: workspaces/tests-fixtures
+  - id: style-cleanup
+    role: maintenance
+    command: python scripts/format_notes.py
+    workspace: workspaces/style-cleanup
