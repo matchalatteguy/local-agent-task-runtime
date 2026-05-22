@@ -7,7 +7,18 @@ from local_agent_runtime import (
     SqliteRuntimeStore,
 )
 from local_agent_runtime.dispatch import Dispatcher
-from local_agent_runtime.models import TaskStatus
+from local_agent_runtime.models import TaskStatus, WorkerSpec
+
+
+class FailingFirstSessionManager(FakeSessionManager):
+    def __init__(self, failed_task_id: str) -> None:
+        super().__init__()
+        self.failed_task_id = failed_task_id
+
+    def start(self, task_id: str, spec: WorkerSpec) -> str:
+        if task_id == self.failed_task_id:
+            raise RuntimeError("boom")
+        return super().start(task_id, spec)
 
 
 def test_dispatch_respects_capacity_and_order(tmp_path):
@@ -36,3 +47,21 @@ def test_blocked_and_done_tasks_are_not_dispatched(tmp_path):
     runtime.store.update_task("done", status=TaskStatus.DONE)
     result = Dispatcher(runtime).dispatch_ready(max_concurrent=2)
     assert result.started == []
+
+
+def test_dispatch_continues_filling_capacity_after_start_failure(tmp_path):
+    runtime = AgentTaskRuntime(
+        SqliteRuntimeStore(tmp_path / "runtime.sqlite3"),
+        FailingFirstSessionManager("a"),
+        DirectoryWorkspaceManager(tmp_path / "workspaces"),
+    )
+    for name in ["a", "b", "c"]:
+        runtime.register_task(name, "docs", f"python {name}.py", name)
+
+    result = Dispatcher(runtime).dispatch_ready(max_concurrent=2)
+
+    assert result.started == ["b", "c"]
+    assert result.skipped == {"a": "start_failed: boom"}
+    assert result.active_count == 2
+    assert result.capacity_remaining == 0
+    assert runtime.store.get_task("a").status == TaskStatus.READY

@@ -142,14 +142,15 @@ class AgentTaskRuntime:
                 self.store.append_event(item.task_id, "stale", item.to_dict())
         return {"stale": [item.to_dict() for item in stale], "stopped": stopped}
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, stale_after: timedelta = timedelta(minutes=30)) -> dict[str, Any]:
         running = self.store.list_tasks(TaskStatus.RUNNING)
-        recent_events = [event.to_dict() for event in self.store.read_events(limit=20)]
+        recent_events = [
+            event.to_dict() for event in reversed(self.store.read_events(limit=20))
+        ]
         return {
             "counts": self.store.counts_by_status(),
             "active_tasks": task_dicts(running),
-            "stale_tasks": [
-                item.to_dict() for item in self.compute_stale_tasks(timedelta(minutes=30))
-            ],
+            "stale_after_seconds": int(stale_after.total_seconds()),
+            "stale_tasks": [item.to_dict() for item in self.compute_stale_tasks(stale_after)],
             "recent_events": recent_events,
         }

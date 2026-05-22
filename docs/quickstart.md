@@ -2,6 +2,16 @@
 
 This page walks through a safe first run with the fake session adapter. It creates local files under `.agent-runtime/` and does not require tmux or external services.
 
+If you prefer not to repeat common flags, set environment defaults once per shell:
+
+```bash
+export LOCAL_AGENT_RUNTIME_DB=.agent-runtime/runtime.sqlite3
+export LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT=.agent-runtime/workspaces
+export LOCAL_AGENT_RUNTIME_SESSION=fake
+```
+
+Explicit `--db`, `--workspace-root`, and `--session` flags override those variables.
+
 ## 1. Initialize the runtime store
 
 ```bash
@@ -47,6 +57,12 @@ uv run agent-runtime --db .agent-runtime/runtime.sqlite3 events docs-quickstart 
 ```
 
 You should see `status: "running"`, a session id like `agent-runtime-docs-quickstart`, and events such as `registered` and `started`.
+
+With the environment defaults shown at the top of this page, the same start command can be shortened to:
+
+```bash
+uv run agent-runtime start docs-quickstart
+```
 
 ## 4. Send a heartbeat
 

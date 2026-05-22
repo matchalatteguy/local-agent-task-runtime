@@ -57,3 +57,20 @@ def test_stale_heartbeat_reason_is_stable(tmp_path):
     runtime.store.update_task("slow", heartbeat_at=old)
     stale = runtime.compute_stale_tasks(timedelta(minutes=30))
     assert [(item.task_id, item.reason) for item in stale] == [("slow", "heartbeat_stale")]
+
+
+def test_summary_recent_events_are_limited_to_newest_first(tmp_path):
+    runtime = make_runtime(tmp_path)
+    for index in range(25):
+        task_id = f"task-{index:02d}"
+        runtime.register_task(task_id, "docs", "python task.py", task_id)
+
+    recent_events = runtime.summary()["recent_events"]
+
+    assert [event["task_id"] for event in recent_events[:3]] == [
+        "task-24",
+        "task-23",
+        "task-22",
+    ]
+    assert len(recent_events) == 20
+    assert recent_events[-1]["task_id"] == "task-05"

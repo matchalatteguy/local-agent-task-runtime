@@ -103,7 +103,10 @@ Statuses are intentionally small and stable:
 | Command | Purpose |
 | --- | --- |
 | `init` | Create or update the SQLite schema. |
+| `doctor` | Print DB path, schema version, session adapter, and workspace root. |
 | `register` | Insert a task with an id, role, command, workspace, and optional branch. |
+| `import` | Register tasks from dependency-free JSON backlog files. |
+| `export` | Write a JSON snapshot of tasks and events. |
 | `start` | Prepare the workspace and start one task. |
 | `stop` | Stop a session and record `stopped`, `blocked`, or `failed`. |
 | `done` | Stop any live session and record a final handoff note. |
@@ -116,6 +119,40 @@ Statuses are intentionally small and stable:
 | `events` | Print a task's append-only event stream. |
 
 Most inspection commands support `--json`; state-changing commands emit JSON by default.
+`sync`, `tick`, and `summary` accept `--stale-after <minutes>` so operators can tune
+heartbeat freshness for short or long-running local work.
+
+## JSON backlog import/export
+
+For reusable examples and simple migrations, the CLI can import JSON without adding a YAML
+runtime dependency. Use either a top-level task list or a versioned object:
+
+```json
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "docs-quickstart",
+      "role": "docs",
+      "command": "python scripts/write_docs.py",
+      "workspace": "docs-quickstart"
+    }
+  ]
+}
+```
+
+```bash
+uv run agent-runtime \
+  --db .agent-runtime/runtime.sqlite3 \
+  --workspace-root .agent-runtime/workspaces \
+  import examples/repo-maintenance/tasks.json
+
+uv run agent-runtime --db .agent-runtime/runtime.sqlite3 export --output backlog-snapshot.json
+uv run agent-runtime --db .agent-runtime/runtime.sqlite3 doctor
+```
+
+The export snapshot includes task records and append-only lifecycle events. Review it before
+sharing because commands, notes, and event payloads are stored verbatim.
 
 ## Library usage
 
@@ -141,6 +178,32 @@ runtime.start_task("docs-quickstart")
 runtime.heartbeat("docs-quickstart")
 runtime.mark_done("docs-quickstart", notes="Updated README and examples.")
 ```
+
+For applications that want the same defaults as the CLI, use `RuntimeConfig` instead of
+assembling the store, workspace manager, and session adapter by hand:
+
+```python
+from local_agent_runtime import RuntimeConfig
+
+runtime = RuntimeConfig.from_env(
+    db_path=".agent-runtime/runtime.sqlite3",
+    workspace_root=".agent-runtime/workspaces",
+    session="fake",
+).create_runtime()
+```
+
+The CLI and `RuntimeConfig.from_env()` both recognize these environment variables:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `LOCAL_AGENT_RUNTIME_DB` | SQLite runtime path | `.agent-runtime/runtime.sqlite3` |
+| `LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT` | Root for relative task workspaces | `.` |
+| `LOCAL_AGENT_RUNTIME_SESSION` | Session adapter, `fake` or `tmux` | `tmux` |
+
+Explicit CLI flags and explicit `RuntimeConfig.from_env(...)` arguments override environment values.
+
+The SQLite schema version is stored in `PRAGMA user_version`; this release writes version `1`
+and refuses to open databases created by a newer unsupported runtime.
 
 ## Workspace isolation
 

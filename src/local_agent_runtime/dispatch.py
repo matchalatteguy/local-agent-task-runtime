@@ -22,7 +22,9 @@ class Dispatcher:
             for task in self.runtime.store.ready_tasks():
                 skipped[task.id] = "capacity_reached"
             return DispatchResult(started, skipped, active_count, 0)
-        for task in self.runtime.store.ready_tasks(limit=capacity):
+        for task in self.runtime.store.ready_tasks():
+            if len(started) >= capacity:
+                break
             try:
                 self.runtime.start_task(task.id)
                 started.append(task.id)
@@ -36,4 +38,8 @@ class Dispatcher:
     ) -> dict[str, object]:
         sync = self.runtime.sync_runtime(stale_after=stale_after)
         dispatch = self.dispatch_ready(max_concurrent)
-        return {"sync": sync, "dispatch": dispatch.to_dict(), "summary": self.runtime.summary()}
+        return {
+            "sync": sync,
+            "dispatch": dispatch.to_dict(),
+            "summary": self.runtime.summary(stale_after=stale_after),
+        }

@@ -1,5 +1,7 @@
 """Local-first runtime for durable agent and script task execution."""
 
+from .backlog import export_backlog, load_backlog, register_backlog
+from .config import RuntimeConfig
 from .dispatch import Dispatcher
 from .models import DispatchResult, StaleTask, TaskEvent, TaskRecord, TaskStatus, WorkerSpec
 from .runtime import AgentTaskRuntime
@@ -14,8 +16,12 @@ __all__ = [
     "DirectoryWorkspaceManager",
     "DispatchResult",
     "Dispatcher",
+    "export_backlog",
     "FakeSessionManager",
     "GitWorktreeWorkspaceManager",
+    "load_backlog",
+    "register_backlog",
+    "RuntimeConfig",
     "SessionManager",
     "SqliteRuntimeStore",
     "StaleTask",

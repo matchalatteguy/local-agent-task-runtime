@@ -18,6 +18,7 @@ from .models import (
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SENTINEL = object()
+SCHEMA_VERSION = 1
 
 
 class SqliteRuntimeStore:
@@ -65,6 +66,20 @@ class SqliteRuntimeStore:
                 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id, id);
                 """
             )
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {current_version} is newer than supported "
+                    f"version {SCHEMA_VERSION}"
+                )
+            if current_version == 0:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def schema_version(self) -> int:
+        """Return the SQLite schema version stored in PRAGMA user_version."""
+
+        with self.connect() as conn:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
     def register_task(
         self,
@@ -189,13 +204,17 @@ class SqliteRuntimeStore:
             self.get_task(task_id)
             clause = "WHERE task_id = ?"
             params.append(task_id)
-        suffix = "ORDER BY id ASC"
-        if limit is not None:
-            suffix += " LIMIT ?"
+        if limit is None:
+            suffix = "ORDER BY id ASC"
+        else:
+            suffix = "ORDER BY id DESC LIMIT ?"
             params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(f"SELECT * FROM events {clause} {suffix}", params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        events = [self._row_to_event(row) for row in rows]
+        if limit is not None:
+            events.reverse()
+        return events
 
     def counts_by_status(self) -> dict[str, int]:
         with self.connect() as conn:
