@@ -29,7 +29,16 @@ uv run agent-runtime --db .agent-runtime/runtime.sqlite3 start docs-quickstart -
 tmux attach-session -t agent-runtime-docs-quickstart
 ```
 
-The adapter starts the configured task command in the prepared workspace. If the session already exists, `start` reuses the session id instead of creating a duplicate.
+The adapter starts the configured shell command in the prepared workspace. If a
+session with the exact name already exists, launch fails and preserves the
+previous task status. Inspect that session before restarting; an old session is
+never silently assigned to a new launch. Targets use tmux's exact-name syntax
+(`=agent-runtime-<task-id>`) to avoid matching a similarly named worker.
+
+A process exiting closes its session. That does not establish success: `sync`
+records `stopped` for a missing session. Record `done` explicitly after checking
+the worker's output, or have the worker call `done` as its final operation.
+Completion is persisted before the session is stopped.
 
 ## Platform notes
 

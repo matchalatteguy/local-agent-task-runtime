@@ -1,12 +1,12 @@
 [project]
 name = "local-agent-task-runtime"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first SQLite runtime for coordinating durable agent and script tasks."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Local Agent Task Runtime contributors" }]
+authors = [{ name = "matchalatteguy" }]
 keywords = ["agents", "sqlite", "task-runner", "tmux", "local-first"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -15,9 +15,15 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/matchalatteguy/local-agent-task-runtime"
+Issues = "https://github.com/matchalatteguy/local-agent-task-runtime/issues"
 
 [project.scripts]
 agent-runtime = "local_agent_runtime.cli:main"

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,11 @@ from .models import (
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SENTINEL = object()
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+class TaskStateConflict(ValueError):
+    """The task changed state before an operation could acquire ownership."""
 
 
 class SqliteRuntimeStore:
@@ -29,16 +34,31 @@ class SqliteRuntimeStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.init_schema()
 
-    def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
-        return conn
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def init_schema(self) -> None:
         with self.connect() as conn:
-            conn.executescript(
-                """
-                PRAGMA journal_mode=WAL;
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema version {current_version} is newer than supported "
+                    f"version {SCHEMA_VERSION}"
+                )
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN IMMEDIATE")
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version > SCHEMA_VERSION:
+                raise RuntimeError("database schema changed to a newer unsupported version")
+            schema = """
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     role TEXT NOT NULL,
@@ -65,14 +85,10 @@ class SqliteRuntimeStore:
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id, id);
                 """
-            )
-            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if current_version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"database schema version {current_version} is newer than supported "
-                    f"version {SCHEMA_VERSION}"
-                )
-            if current_version == 0:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            if current_version < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def schema_version(self) -> int:
@@ -148,6 +164,50 @@ class SqliteRuntimeStore:
         tasks = self.list_tasks(TaskStatus.READY)
         return tasks if limit is None else tasks[:limit]
 
+    def active_tasks(self) -> list[TaskRecord]:
+        return [
+            task
+            for task in self.list_tasks()
+            if task.status in {TaskStatus.STARTING, TaskStatus.RUNNING}
+        ]
+
+    def claim_for_start(self, task_id: str, max_concurrent: int | None = None) -> TaskRecord:
+        """Reserve one task and a capacity slot in the same SQLite transaction.
+
+        External processes are launched after this transaction commits. A crash
+        during launch leaves an inspectable ``starting`` task for reconciliation.
+        """
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            task = self._row_to_task(row)
+            if task.status not in {TaskStatus.READY, TaskStatus.STOPPED, TaskStatus.BLOCKED}:
+                raise TaskStateConflict(f"cannot start task in status {task.status.value}")
+            if max_concurrent is not None:
+                if max_concurrent < 1:
+                    raise ValueError("max_concurrent must be at least 1")
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE status IN (?, ?)",
+                    (TaskStatus.STARTING.value, TaskStatus.RUNNING.value),
+                ).fetchone()[0]
+                if count >= max_concurrent:
+                    raise TaskStateConflict("capacity_reached")
+            now = utc_now().isoformat()
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ?, session_id = NULL, "
+                "started_at = NULL, completed_at = NULL, heartbeat_at = NULL WHERE id = ?",
+                (TaskStatus.STARTING.value, now, task_id),
+            )
+            self._append_event(
+                conn,
+                task_id,
+                "start_claimed",
+                {"from": task.status.value, "to": TaskStatus.STARTING.value},
+            )
+        return task
+
     def update_task(
         self,
         task_id: str,
@@ -160,8 +220,8 @@ class SqliteRuntimeStore:
         heartbeat_at: Any = _SENTINEL,
         event_kind: str | None = None,
         event_payload: dict[str, Any] | None = None,
+        expected_status: TaskStatus | None = None,
     ) -> TaskRecord:
-        current = self.get_task(task_id)
         values: dict[str, Any] = {"updated_at": utc_now().isoformat()}
         if status is not None:
             values["status"] = TaskStatus(status).value
@@ -178,6 +238,15 @@ class SqliteRuntimeStore:
         assignments = ", ".join(f"{key} = ?" for key in values)
         params = [*values.values(), task_id]
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            current = self._row_to_task(row)
+            if expected_status is not None and current.status != expected_status:
+                raise TaskStateConflict(
+                    f"task {task_id} changed from {expected_status.value} to {current.status.value}"
+                )
             conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", params)
             if event_kind:
                 payload = event_payload or {}

@@ -75,13 +75,25 @@ uv run agent-runtime \
 uv run agent-runtime --db .agent-runtime/runtime.sqlite3 summary --json
 ```
 
-To run one task for real from this example directory, start it with the tmux adapter:
+To run one task for real after the fake exercise, use a separate database and the tmux adapter:
 
 ```bash
 uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  --workspace-root . \
+  --db .agent-runtime/real.sqlite3 --workspace-root . import tasks.json
+
+uv run agent-runtime \
+  --db .agent-runtime/real.sqlite3 --workspace-root . \
   start docs-quickstart --session tmux
 ```
 
 The command writes `workspaces/docs-quickstart/quickstart-notes.md`.
+
+The short worker exits after writing the file. Verify that output, then record
+completion explicitly:
+
+```bash
+cat workspaces/docs-quickstart/quickstart-notes.md
+uv run agent-runtime --db .agent-runtime/real.sqlite3 done docs-quickstart --session tmux --notes "quickstart-notes.md verified."
+```
+
+A closed session alone does not establish a successful result.

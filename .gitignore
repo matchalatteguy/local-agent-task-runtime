@@ -1,4 +1,6 @@
 .venv/
+.wheel-smoke/
+.agent-runtime/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

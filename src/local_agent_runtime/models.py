@@ -9,6 +9,7 @@ from typing import Any
 
 class TaskStatus(StrEnum):
     READY = "ready"
+    STARTING = "starting"
     RUNNING = "running"
     STOPPED = "stopped"
     BLOCKED = "blocked"
@@ -129,4 +130,9 @@ def require_relative_or_contained(path: str, root: Path | None = None) -> str:
         return str(resolved_candidate)
     if ".." in candidate.parts:
         raise ValueError("workspace path must not contain '..'")
+    if root is not None:
+        resolved_root = root.resolve()
+        resolved_candidate = (resolved_root / candidate).resolve()
+        if resolved_root != resolved_candidate and resolved_root not in resolved_candidate.parents:
+            raise ValueError("workspace path must stay inside the workspace root")
     return str(candidate)

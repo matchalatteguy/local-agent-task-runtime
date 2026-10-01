@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Any
 
 from .models import StaleTask, TaskRecord, TaskStatus, WorkerSpec, utc_now
 from .sessions import SessionManager
-from .store import SqliteRuntimeStore, task_dicts
+from .store import SqliteRuntimeStore, TaskStateConflict, task_dicts
 from .workspaces import DirectoryWorkspaceManager, WorkspaceManager
 
 
@@ -43,23 +44,39 @@ class AgentTaskRuntime:
         )
         return self.store.register_task(task_id, role, command, workspace, branch, root)
 
-    def start_task(self, task_id: str) -> TaskRecord:
-        task = self.store.get_task(task_id)
-        if task.status not in {TaskStatus.READY, TaskStatus.STOPPED, TaskStatus.BLOCKED}:
-            raise ValueError(f"cannot start task in status {task.status.value}")
-        workspace = self.workspaces.prepare(task)
-        spec = WorkerSpec(command=task.command, cwd=str(workspace))
-        session_id = self.sessions.start(task.id, spec)
+    def start_task(self, task_id: str, max_concurrent: int | None = None) -> TaskRecord:
+        task = self.store.claim_for_start(task_id, max_concurrent=max_concurrent)
+        try:
+            workspace = self.workspaces.prepare(task)
+            spec = WorkerSpec(command=task.command, cwd=str(workspace))
+            session_id = self.sessions.start(task.id, spec)
+        except Exception as exc:
+            with suppress(TaskStateConflict):  # preserve an operator's intervening state change
+                self.store.update_task(
+                    task.id,
+                    status=task.status,
+                    expected_status=TaskStatus.STARTING,
+                    event_kind="start_failed",
+                    event_payload={"error": str(exc)},
+                )
+            raise
         now = utc_now()
-        return self.store.update_task(
-            task.id,
-            status=TaskStatus.RUNNING,
-            session_id=session_id,
-            started_at=now,
-            heartbeat_at=now,
-            event_kind="started",
-            event_payload={"session_id": session_id, "workspace": str(workspace)},
-        )
+        try:
+            return self.store.update_task(
+                task.id,
+                status=TaskStatus.RUNNING,
+                expected_status=TaskStatus.STARTING,
+                session_id=session_id,
+                started_at=now,
+                heartbeat_at=now,
+                event_kind="started",
+                event_payload={"session_id": session_id, "workspace": str(workspace)},
+            )
+        except TaskStateConflict:
+            # A fast worker or operator may have completed/stopped the task while
+            # the adapter was launching. Never overwrite that final state.
+            self.sessions.stop(session_id)
+            return self.store.get_task(task_id)
 
     def stop_task(
         self, task_id: str, status: TaskStatus | str = TaskStatus.BLOCKED, notes: str | None = None
@@ -81,9 +98,7 @@ class AgentTaskRuntime:
 
     def mark_done(self, task_id: str, notes: str | None = None) -> TaskRecord:
         task = self.store.get_task(task_id)
-        if task.session_id and self.sessions.exists(task.session_id):
-            self.sessions.stop(task.session_id)
-        return self.store.update_task(
+        result = self.store.update_task(
             task.id,
             status=TaskStatus.DONE,
             notes=notes,
@@ -92,6 +107,11 @@ class AgentTaskRuntime:
             event_kind="done",
             event_payload={"notes": notes},
         )
+        # Persist completion first: calling `done` inside a tmux worker may
+        # terminate the calling process when its own session is stopped.
+        if task.session_id and self.sessions.exists(task.session_id):
+            self.sessions.stop(task.session_id)
+        return result
 
     def heartbeat(self, task_id: str) -> TaskRecord:
         return self.store.update_task(
@@ -104,6 +124,9 @@ class AgentTaskRuntime:
     def compute_stale_tasks(self, stale_after: timedelta) -> list[StaleTask]:
         now = utc_now()
         stale: list[StaleTask] = []
+        for task in self.store.list_tasks(TaskStatus.STARTING):
+            if now - task.updated_at > stale_after:
+                stale.append(StaleTask(task.id, "launch_stale", "worker launch was interrupted"))
         for task in self.store.list_tasks(TaskStatus.RUNNING):
             if not task.session_id:
                 stale.append(
@@ -129,24 +152,29 @@ class AgentTaskRuntime:
         stale = self.compute_stale_tasks(stale_after)
         stopped: list[str] = []
         for item in stale:
-            if item.reason == "session_missing":
-                self.store.update_task(
-                    item.task_id,
-                    status=TaskStatus.STOPPED,
-                    session_id=None,
-                    event_kind="sync_stopped",
-                    event_payload={"reason": item.reason, "detail": item.detail},
+            if item.reason in {"session_missing", "launch_stale"}:
+                expected = (
+                    TaskStatus.STARTING if item.reason == "launch_stale" else TaskStatus.RUNNING
                 )
+                try:
+                    self.store.update_task(
+                        item.task_id,
+                        status=TaskStatus.STOPPED,
+                        session_id=None,
+                        expected_status=expected,
+                        event_kind="sync_stopped",
+                        event_payload={"reason": item.reason, "detail": item.detail},
+                    )
+                except TaskStateConflict:
+                    continue
                 stopped.append(item.task_id)
             else:
                 self.store.append_event(item.task_id, "stale", item.to_dict())
         return {"stale": [item.to_dict() for item in stale], "stopped": stopped}
 
     def summary(self, stale_after: timedelta = timedelta(minutes=30)) -> dict[str, Any]:
-        running = self.store.list_tasks(TaskStatus.RUNNING)
-        recent_events = [
-            event.to_dict() for event in reversed(self.store.read_events(limit=20))
-        ]
+        running = self.store.active_tasks()
+        recent_events = [event.to_dict() for event in reversed(self.store.read_events(limit=20))]
         return {
             "counts": self.store.counts_by_status(),
             "active_tasks": task_dicts(running),

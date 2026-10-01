@@ -1,89 +1,58 @@
 # Quickstart
 
-This page walks through a safe first run with the fake session adapter. It creates local files under `.agent-runtime/` and does not require tmux or external services.
-
-If you prefer not to repeat common flags, set environment defaults once per shell:
+Start with the real, portable example from a fresh checkout:
 
 ```bash
-export LOCAL_AGENT_RUNTIME_DB=.agent-runtime/runtime.sqlite3
-export LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT=.agent-runtime/workspaces
-export LOCAL_AGENT_RUNTIME_SESSION=fake
+uv sync --locked
+uv run python -m local_agent_runtime.demo --output .agent-runtime/demo
 ```
 
-Explicit `--db`, `--workspace-root`, and `--session` flags override those variables.
-
-## 1. Initialize the runtime store
-
-```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 init
-```
-
-Expected shape:
+It executes a Python subprocess that summarizes an inventory CSV. Expect one
+`done` task, an event stream of `registered`, `start_claimed`, `started`,
+`heartbeat`, `done`, and this artifact:
 
 ```json
-{
-  "db": ".agent-runtime/runtime.sqlite3",
-  "initialized": true
-}
+{"inventory_value": "82.49", "items": 3, "total_units": 18}
 ```
 
-## 2. Register a task
-
-Use a relative workspace path. It will be resolved under `--workspace-root`.
+The artifact is `.agent-runtime/demo/workspaces/inventory/summary.json`; durable
+state is `.agent-runtime/demo/runtime.sqlite3`. Use a fresh output directory for
+another run. The demo adapter belongs to its supervisor process and does not
+provide detached recovery.
 
 ```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  --workspace-root .agent-runtime/workspaces \
-  register \
-  --id docs-quickstart \
-  --role docs \
-  --command "python scripts/write_docs.py" \
-  --workspace docs-quickstart
+uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 list --json
+uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 events inventory --json
 ```
 
-The command is intentionally synthetic. With `--session fake`, the runtime records session state without executing the command.
+## Try the CLI lifecycle without executing work
 
-## 3. Start and inspect
+The fake adapter stores simulated session ids. It executes no commands, even if
+the command is runnable. Use a separate database from the real example:
 
 ```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  --workspace-root .agent-runtime/workspaces \
-  start docs-quickstart --session fake
+export LOCAL_AGENT_RUNTIME_DB=.agent-runtime/fake.sqlite3
+export LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT=.agent-runtime/workspaces
+export LOCAL_AGENT_RUNTIME_SESSION=fake
 
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 list --status running --json
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 events docs-quickstart --json
+uv run agent-runtime init
+uv run agent-runtime register --id practice --role docs --workspace practice --command "printf 'hello'"
+uv run agent-runtime start practice
+uv run agent-runtime heartbeat practice
+uv run agent-runtime done practice --notes "Lifecycle exercise complete."
+uv run agent-runtime events practice --json
 ```
 
-You should see `status: "running"`, a session id like `agent-runtime-docs-quickstart`, and events such as `registered` and `started`.
+The final state is `done`. Explicit `--db`, `--workspace-root`, and `--session`
+flags override the environment defaults. Unset these variables before following
+examples that rely on the default tmux adapter.
 
-With the environment defaults shown at the top of this page, the same start command can be shortened to:
+## Run detached workers
 
-```bash
-uv run agent-runtime start docs-quickstart
-```
+See the [README detached-worker example](../README.md#start-a-detached-worker)
+for an executable tmux command. A disappearing session is recorded as `stopped`,
+not as success. Record completion after checking its output.
 
-## 4. Send a heartbeat
-
-```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 heartbeat docs-quickstart
-```
-
-Heartbeats update `heartbeat_at` and append a `heartbeat` event. Supervisors use this timestamp to identify tasks that may need attention.
-
-## 5. Complete with a handoff note
-
-```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  done docs-quickstart --session fake --notes "README quickstart updated."
-```
-
-The task moves to `done`, the fake session is removed, and the note is stored on the task record and in the event stream.
-
-## Next steps
-
-- Replace `--session fake` with `--session tmux` when you want real detached execution.
-- Run `tick --max-concurrent 2` to reconcile and dispatch several registered tasks.
-- Read `workspace-isolation.md` before using absolute paths or git worktrees.
+Use `tick --max-concurrent 2 --session tmux` to reconcile sessions and dispatch
+ready work. Read [workspace isolation](workspace-isolation.md) before using git
+worktrees, and [the changelog](../CHANGELOG.md) before opening a 0.1 database.
