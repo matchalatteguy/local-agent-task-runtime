@@ -23,6 +23,7 @@ A task record includes:
 ## Status model
 
 - `ready`: eligible for dispatch.
+- `starting`: reserved while workspace preparation and session launch are in progress.
 - `running`: owned by a worker session.
 - `stopped`: was running but the session disappeared or was stopped.
 - `blocked`: paused until a human or manager provides input.
@@ -36,6 +37,8 @@ A task record includes:
 Events explain how a task reached its current state. Typical event kinds include:
 
 - `registered`
+- `start_claimed`
+- `start_failed`
 - `started`
 - `heartbeat`
 - `stopped`
@@ -47,4 +50,9 @@ Events are ordered by SQLite autoincrement ids and include JSON payloads. This m
 
 ## Local-first operating model
 
-The runtime is designed for one local machine and one SQLite file. It does not attempt multi-host locking or distributed scheduling. A human, cron job, shell loop, or supervising agent can call `tick` repeatedly to reconcile state and start ready tasks up to a concurrency cap.
+The runtime is designed for one local machine and one SQLite file. Task claims and
+dispatch capacity reservations are atomic SQLite transactions, including the
+`starting` state. All dispatchers should use the same concurrency cap. Direct
+`start` is a manual override of dispatch capacity. A human, cron job, shell loop,
+or supervisor can call `tick` repeatedly to reconcile state and dispatch ready
+tasks. There are no multi-host leases or exactly-once execution guarantees.

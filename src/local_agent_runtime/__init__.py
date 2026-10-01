@@ -9,7 +9,7 @@ from .sessions import FakeSessionManager, SessionManager, TmuxSessionManager
 from .store import SqliteRuntimeStore
 from .workspaces import DirectoryWorkspaceManager, GitWorktreeWorkspaceManager
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AgentTaskRuntime",

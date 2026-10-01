@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,13 @@ from .models import WorkerSpec
 
 
 class SessionManager(Protocol):
+    """Adapters honor WorkerSpec.session_name as a unique launch identity.
+
+    Returned ids must identify that attempt, so stopping an abandoned launch
+    cannot affect its replacement. Explicit names supplied directly to an
+    adapter retain their meaning.
+    """
+
     def start(self, task_id: str, spec: WorkerSpec) -> str: ...
     def stop(self, session_id: str) -> None: ...
     def exists(self, session_id: str) -> bool: ...
@@ -69,8 +77,14 @@ class TmuxSessionManager:
         if shutil.which("tmux") is None:
             raise RuntimeError("tmux is not installed or not on PATH")
         session_id = spec.session_name or f"{self.prefix}-{task_id}"
+        if "." in session_id or ":" in session_id:
+            raise ValueError("tmux session names cannot contain '.' or ':'; choose another task id")
         if self.exists(session_id):
-            return session_id
+            raise RuntimeError(
+                f"session already exists: {session_id}; inspect it before restarting"
+            )
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key in spec.env):
+            raise ValueError("worker environment names must be valid shell variable names")
         cwd = Path(spec.cwd or ".")
         env_parts = [f"{key}={shlex.quote(value)}" for key, value in sorted(spec.env.items())]
         command = " ".join([*env_parts, spec.command]).strip()
@@ -83,15 +97,18 @@ class TmuxSessionManager:
     def stop(self, session_id: str) -> None:
         if shutil.which("tmux") is None:
             raise RuntimeError("tmux is not installed or not on PATH")
-        subprocess.run(["tmux", "kill-session", "-t", session_id], check=False)
+        subprocess.run(["tmux", "kill-session", "-t", f"={session_id}"], check=False)
 
     def exists(self, session_id: str) -> bool:
         if shutil.which("tmux") is None:
             return False
         result = subprocess.run(
-            ["tmux", "has-session", "-t", session_id], check=False, capture_output=True, text=True
+            ["tmux", "has-session", "-t", f"={session_id}"],
+            check=False,
+            capture_output=True,
+            text=True,
         )
         return result.returncode == 0
 
     def attach_command(self, session_id: str) -> str:
-        return "tmux attach-session -t " + shlex.quote(session_id)
+        return "tmux attach-session -t " + shlex.quote(f"={session_id}")

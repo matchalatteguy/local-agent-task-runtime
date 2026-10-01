@@ -9,6 +9,7 @@ from typing import Any
 
 class TaskStatus(StrEnum):
     READY = "ready"
+    STARTING = "starting"
     RUNNING = "running"
     STOPPED = "stopped"
     BLOCKED = "blocked"
@@ -59,6 +60,7 @@ class TaskRecord:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     heartbeat_at: datetime | None = None
+    launch_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +77,7 @@ class TaskRecord:
             "started_at": to_iso(self.started_at),
             "completed_at": to_iso(self.completed_at),
             "heartbeat_at": to_iso(self.heartbeat_at),
+            "launch_token": self.launch_token,
         }
 
 
@@ -101,8 +104,9 @@ class StaleTask:
     task_id: str
     reason: str
     detail: str
+    launch_token: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return asdict(self)
 
 
@@ -129,4 +133,9 @@ def require_relative_or_contained(path: str, root: Path | None = None) -> str:
         return str(resolved_candidate)
     if ".." in candidate.parts:
         raise ValueError("workspace path must not contain '..'")
+    if root is not None:
+        resolved_root = root.resolve()
+        resolved_candidate = (resolved_root / candidate).resolve()
+        if resolved_root != resolved_candidate and resolved_root not in resolved_candidate.parents:
+            raise ValueError("workspace path must stay inside the workspace root")
     return str(candidate)

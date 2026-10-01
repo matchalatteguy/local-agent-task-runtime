@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from local_agent_runtime.models import TaskStatus
-from local_agent_runtime.store import SqliteRuntimeStore
+from local_agent_runtime.store import SCHEMA_VERSION, SqliteRuntimeStore
 
 
 def test_init_is_idempotent(tmp_path):
@@ -11,7 +11,7 @@ def test_init_is_idempotent(tmp_path):
     first = SqliteRuntimeStore(db)
     second = SqliteRuntimeStore(db)
     assert first.path == second.path
-    assert second.schema_version() == 1
+    assert second.schema_version() == SCHEMA_VERSION
     assert second.counts_by_status() == {}
 
 
@@ -24,6 +24,27 @@ def test_newer_schema_version_is_rejected(tmp_path):
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         SqliteRuntimeStore(db)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+@pytest.mark.parametrize("previous_version", [1, 2])
+def test_token_upgrade_preserves_task_and_event(tmp_path, previous_version):
+    import sqlite3
+
+    db = tmp_path / "runtime.sqlite3"
+    store = SqliteRuntimeStore(db)
+    store.register_task("old", "docs", "python task.py", "old")
+    store.update_task("old", notes="existing handoff", event_kind="note")
+    expected_task = store.get_task("old").to_dict()
+    expected_events = [event.to_dict() for event in store.read_events("old")]
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE tasks DROP COLUMN launch_token")
+        conn.execute(f"PRAGMA user_version = {previous_version}")
+    upgraded = SqliteRuntimeStore(db)
+    assert upgraded.schema_version() == SCHEMA_VERSION
+    assert upgraded.get_task("old").to_dict() == expected_task
+    assert [event.to_dict() for event in upgraded.read_events("old")] == expected_events
 
 
 def test_register_validates_duplicate_and_workspace(tmp_path):
