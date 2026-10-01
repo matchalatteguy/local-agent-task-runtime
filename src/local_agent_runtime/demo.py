@@ -24,7 +24,7 @@ class DemoProcessSessions:
         self.processes: dict[str, subprocess.Popen[str]] = {}
 
     def start(self, task_id: str, spec: WorkerSpec) -> str:
-        session_id = f"demo-{task_id}"
+        session_id = spec.session_name or f"demo-{task_id}"
         self.processes[session_id] = subprocess.Popen(
             shlex.split(spec.command),
             cwd=spec.cwd,

@@ -146,6 +146,88 @@ def test_fast_worker_completion_is_not_overwritten_by_start(tmp_path):
     assert not runtime.sessions.live
 
 
+def test_old_launch_cannot_stop_replacement_running_session(tmp_path):
+    runtime = make_runtime(tmp_path)
+
+    class RestartingSessions(FakeSessionManager):
+        calls = 0
+
+        def start(self, task_id, spec):
+            self.calls += 1
+            if self.calls == 1:
+                runtime.stop_task(task_id, TaskStatus.STOPPED)
+                runtime.start_task(task_id)
+            return super().start(task_id, spec)
+
+    runtime.sessions = RestartingSessions()
+    runtime.register_task("restart", "docs", "python task.py", "restart")
+    result = runtime.start_task("restart")
+    assert result.status == TaskStatus.RUNNING
+    assert runtime.sessions.exists(result.session_id)
+    assert runtime.sessions.live == {result.session_id}
+    assert runtime.store.get_task("restart").launch_token == result.launch_token
+
+
+def test_old_launch_cannot_overwrite_or_stop_replacement_while_starting(tmp_path):
+    runtime = make_runtime(tmp_path)
+    entered = Event()
+    release = Event()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+
+        class RestartingSessions(FakeSessionManager):
+            calls = 0
+            replacement_session = None
+            replacement_future = None
+
+            def start(self, task_id, spec):
+                self.calls += 1
+                if self.calls == 1:
+                    runtime.stop_task(task_id, TaskStatus.STOPPED)
+                    self.replacement_future = pool.submit(runtime.start_task, task_id)
+                    assert entered.wait(timeout=5)
+                    return super().start(task_id, spec)
+                self.replacement_session = super().start(task_id, spec)
+                entered.set()
+                assert release.wait(timeout=5)
+                return self.replacement_session
+
+        runtime.sessions = RestartingSessions()
+        runtime.register_task("restart", "docs", "python task.py", "restart")
+        try:
+            result = runtime.start_task("restart")
+            assert result.status == TaskStatus.STARTING
+            assert runtime.sessions.exists(runtime.sessions.replacement_session)
+            assert runtime.sessions.live == {runtime.sessions.replacement_session}
+        finally:
+            release.set()
+        completed = runtime.sessions.replacement_future.result(timeout=5)
+        assert completed.status == TaskStatus.RUNNING
+        assert completed.launch_token == result.launch_token
+        assert runtime.sessions.exists(completed.session_id)
+
+
+def test_stale_generation_cannot_stop_a_restarted_task(tmp_path, monkeypatch):
+    runtime = make_runtime(tmp_path)
+    runtime.register_task("restart", "docs", "python task.py", "restart")
+    old = runtime.start_task("restart")
+    runtime.sessions.live.remove(old.session_id)
+    compute = runtime.compute_stale_tasks
+
+    def restart_during_sync(stale_after):
+        findings = compute(stale_after)
+        runtime.stop_task("restart", TaskStatus.STOPPED)
+        runtime.start_task("restart")
+        return findings
+
+    monkeypatch.setattr(runtime, "compute_stale_tasks", restart_during_sync)
+    assert runtime.sync_runtime()["stopped"] == []
+    current = runtime.store.get_task("restart")
+    assert current.status == TaskStatus.RUNNING
+    assert current.launch_token != old.launch_token
+    assert runtime.sessions.exists(current.session_id)
+
+
 def test_completion_is_persisted_before_stopping_own_session(tmp_path):
     runtime = make_runtime(tmp_path)
 

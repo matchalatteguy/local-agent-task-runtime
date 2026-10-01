@@ -130,7 +130,7 @@ def test_cli_uses_environment_defaults(tmp_path, monkeypatch, capsys):
 
     assert db.exists()
     assert (work / "env-task").is_dir()
-    assert '"session_id": "agent-runtime-env-task"' in capsys.readouterr().out
+    assert '"session_id": "agent-runtime-env-task-' in capsys.readouterr().out
 
 
 def test_cli_fake_session_start_sync_done_smoke(tmp_path, capsys):

@@ -64,7 +64,9 @@ uv run agent-runtime --db .agent-runtime/worker.sqlite3 done hello --session tmu
 ```
 
 The file contains `worker finished`. `done` persists the note and stops the
-session. To watch a live worker, use `tmux attach-session -t =agent-runtime-hello`.
+session. To watch a live worker, copy `session_id` from the `start` JSON result
+into `tmux attach-session -t =SESSION_ID`. Each attempt receives a unique name
+such as `agent-runtime-hello-<launch-token>`.
 Commands passed to tmux are shell commands: use trusted commands.
 
 A session disappearing does **not** establish success. `sync` moves a missing
@@ -87,6 +89,8 @@ ready -> starting -> running -> done
   become `stopped` after the stale threshold.
 - `sync` preserves terminal states recorded while reconciliation is in progress.
   A fast worker's completion cannot be overwritten by the launch finishing.
+  Launch-token checks prevent an old attempt from overwriting or stopping a
+  replacement after an operator stops and restarts the task.
 - Relative and absolute workspace paths must remain under the configured root,
   including when a path passes through a symlink. Directory containment is path
   validation, not an execution sandbox.
@@ -97,8 +101,9 @@ Use one tick in a manager loop:
 uv run agent-runtime --db .agent-runtime/worker.sqlite3 --workspace-root .agent-runtime/workspaces tick --max-concurrent 3 --session tmux
 ```
 
-Choose unique task ids for workers. The runtime refuses to reuse an existing tmux
-session silently; inspect an earlier session before restarting its task.
+Choose unique task ids for workers. Each launch has its own session name. If a
+crash leaves an unrecorded session behind, inspect it before restarting the task.
+The adapter refuses to silently reuse an explicitly requested existing session.
 
 ## CLI and Python API
 

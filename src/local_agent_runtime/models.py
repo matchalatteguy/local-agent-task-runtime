@@ -60,6 +60,7 @@ class TaskRecord:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     heartbeat_at: datetime | None = None
+    launch_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +77,7 @@ class TaskRecord:
             "started_at": to_iso(self.started_at),
             "completed_at": to_iso(self.completed_at),
             "heartbeat_at": to_iso(self.heartbeat_at),
+            "launch_token": self.launch_token,
         }
 
 
@@ -102,8 +104,9 @@ class StaleTask:
     task_id: str
     reason: str
     detail: str
+    launch_token: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return asdict(self)
 
 

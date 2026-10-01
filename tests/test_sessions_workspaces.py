@@ -26,6 +26,13 @@ def test_tmux_attach_command_quotes_session_name():
     )
 
 
+@pytest.mark.parametrize("name", ["release.v1", "release:one"])
+def test_tmux_rejects_names_it_would_normalize_before_start(name, monkeypatch):
+    monkeypatch.setattr("local_agent_runtime.sessions.shutil.which", lambda _: "tmux")
+    with pytest.raises(ValueError, match="cannot contain"):
+        TmuxSessionManager().start("task", WorkerSpec("worker", session_name=name))
+
+
 def test_directory_workspace_stays_in_root(tmp_path):
     manager = DirectoryWorkspaceManager(tmp_path)
     task = TaskRecord(id="docs", role="docs", command="python docs.py", workspace="docs")

@@ -28,7 +28,8 @@ def test_newer_schema_version_is_rejected(tmp_path):
         assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
 
 
-def test_version_one_upgrade_preserves_task_and_event(tmp_path):
+@pytest.mark.parametrize("previous_version", [1, 2])
+def test_token_upgrade_preserves_task_and_event(tmp_path, previous_version):
     import sqlite3
 
     db = tmp_path / "runtime.sqlite3"
@@ -38,7 +39,8 @@ def test_version_one_upgrade_preserves_task_and_event(tmp_path):
     expected_task = store.get_task("old").to_dict()
     expected_events = [event.to_dict() for event in store.read_events("old")]
     with sqlite3.connect(db) as conn:
-        conn.execute("PRAGMA user_version = 1")
+        conn.execute("ALTER TABLE tasks DROP COLUMN launch_token")
+        conn.execute(f"PRAGMA user_version = {previous_version}")
     upgraded = SqliteRuntimeStore(db)
     assert upgraded.schema_version() == SCHEMA_VERSION
     assert upgraded.get_task("old").to_dict() == expected_task

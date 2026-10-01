@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +90,9 @@ class SqliteRuntimeStore:
             for statement in schema.split(";"):
                 if statement.strip():
                     conn.execute(statement)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+            if "launch_token" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN launch_token TEXT")
             if current_version < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -195,18 +200,20 @@ class SqliteRuntimeStore:
                 if count >= max_concurrent:
                     raise TaskStateConflict("capacity_reached")
             now = utc_now().isoformat()
+            token = uuid.uuid4().hex
             conn.execute(
                 "UPDATE tasks SET status = ?, updated_at = ?, session_id = NULL, "
-                "started_at = NULL, completed_at = NULL, heartbeat_at = NULL WHERE id = ?",
-                (TaskStatus.STARTING.value, now, task_id),
+                "started_at = NULL, completed_at = NULL, heartbeat_at = NULL, "
+                "launch_token = ? WHERE id = ?",
+                (TaskStatus.STARTING.value, now, token, task_id),
             )
             self._append_event(
                 conn,
                 task_id,
                 "start_claimed",
-                {"from": task.status.value, "to": TaskStatus.STARTING.value},
+                {"from": task.status.value, "to": TaskStatus.STARTING.value, "launch_token": token},
             )
-        return task
+        return replace(task, launch_token=token)
 
     def update_task(
         self,
@@ -218,9 +225,11 @@ class SqliteRuntimeStore:
         started_at: Any = _SENTINEL,
         completed_at: Any = _SENTINEL,
         heartbeat_at: Any = _SENTINEL,
+        launch_token: str | None | object = _SENTINEL,
         event_kind: str | None = None,
         event_payload: dict[str, Any] | None = None,
         expected_status: TaskStatus | None = None,
+        expected_launch_token: str | None | object = _SENTINEL,
     ) -> TaskRecord:
         values: dict[str, Any] = {"updated_at": utc_now().isoformat()}
         if status is not None:
@@ -235,6 +244,8 @@ class SqliteRuntimeStore:
             values["completed_at"] = completed_at.isoformat() if completed_at else None
         if heartbeat_at is not _SENTINEL:
             values["heartbeat_at"] = heartbeat_at.isoformat() if heartbeat_at else None
+        if launch_token is not _SENTINEL:
+            values["launch_token"] = launch_token
         assignments = ", ".join(f"{key} = ?" for key in values)
         params = [*values.values(), task_id]
         with self.connect() as conn:
@@ -247,6 +258,11 @@ class SqliteRuntimeStore:
                 raise TaskStateConflict(
                     f"task {task_id} changed from {expected_status.value} to {current.status.value}"
                 )
+            if (
+                expected_launch_token is not _SENTINEL
+                and current.launch_token != expected_launch_token
+            ):
+                raise TaskStateConflict(f"task {task_id} belongs to a different launch attempt")
             conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", params)
             if event_kind:
                 payload = event_payload or {}
@@ -334,6 +350,7 @@ class SqliteRuntimeStore:
             started_at=parse_dt(row["started_at"]),
             completed_at=parse_dt(row["completed_at"]),
             heartbeat_at=parse_dt(row["heartbeat_at"]),
+            launch_token=row["launch_token"],
         )
 
     @staticmethod

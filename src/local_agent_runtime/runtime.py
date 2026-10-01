@@ -48,7 +48,13 @@ class AgentTaskRuntime:
         task = self.store.claim_for_start(task_id, max_concurrent=max_concurrent)
         try:
             workspace = self.workspaces.prepare(task)
-            spec = WorkerSpec(command=task.command, cwd=str(workspace))
+            prefix = getattr(self.sessions, "prefix", "agent-runtime")
+            session_name = f"{prefix}-{task.id}-{task.launch_token}"
+            spec = WorkerSpec(
+                command=task.command,
+                cwd=str(workspace),
+                session_name=session_name,
+            )
             session_id = self.sessions.start(task.id, spec)
         except Exception as exc:
             with suppress(TaskStateConflict):  # preserve an operator's intervening state change
@@ -56,6 +62,7 @@ class AgentTaskRuntime:
                     task.id,
                     status=task.status,
                     expected_status=TaskStatus.STARTING,
+                    expected_launch_token=task.launch_token,
                     event_kind="start_failed",
                     event_payload={"error": str(exc)},
                 )
@@ -66,6 +73,7 @@ class AgentTaskRuntime:
                 task.id,
                 status=TaskStatus.RUNNING,
                 expected_status=TaskStatus.STARTING,
+                expected_launch_token=task.launch_token,
                 session_id=session_id,
                 started_at=now,
                 heartbeat_at=now,
@@ -75,7 +83,9 @@ class AgentTaskRuntime:
         except TaskStateConflict:
             # A fast worker or operator may have completed/stopped the task while
             # the adapter was launching. Never overwrite that final state.
-            self.sessions.stop(session_id)
+            current = self.store.get_task(task_id)
+            if current.session_id != session_id:
+                self.sessions.stop(session_id)
             return self.store.get_task(task_id)
 
     def stop_task(
@@ -85,16 +95,18 @@ class AgentTaskRuntime:
         if next_status not in {TaskStatus.STOPPED, TaskStatus.BLOCKED, TaskStatus.FAILED}:
             raise ValueError("stop status must be stopped, blocked, or failed")
         task = self.store.get_task(task_id)
-        if task.session_id:
-            self.sessions.stop(task.session_id)
-        return self.store.update_task(
+        result = self.store.update_task(
             task.id,
             status=next_status,
             notes=notes,
             session_id=None,
             event_kind="stopped",
             event_payload={"notes": notes, "requested_status": next_status.value},
+            expected_launch_token=task.launch_token,
         )
+        if task.session_id:
+            self.sessions.stop(task.session_id)
+        return result
 
     def mark_done(self, task_id: str, notes: str | None = None) -> TaskRecord:
         task = self.store.get_task(task_id)
@@ -106,6 +118,7 @@ class AgentTaskRuntime:
             completed_at=utc_now(),
             event_kind="done",
             event_payload={"notes": notes},
+            expected_launch_token=task.launch_token,
         )
         # Persist completion first: calling `done` inside a tmux worker may
         # terminate the calling process when its own session is stopped.
@@ -126,16 +139,33 @@ class AgentTaskRuntime:
         stale: list[StaleTask] = []
         for task in self.store.list_tasks(TaskStatus.STARTING):
             if now - task.updated_at > stale_after:
-                stale.append(StaleTask(task.id, "launch_stale", "worker launch was interrupted"))
+                stale.append(
+                    StaleTask(
+                        task.id,
+                        "launch_stale",
+                        "worker launch was interrupted",
+                        task.launch_token,
+                    )
+                )
         for task in self.store.list_tasks(TaskStatus.RUNNING):
             if not task.session_id:
                 stale.append(
-                    StaleTask(task.id, "session_missing", "running task has no session id")
+                    StaleTask(
+                        task.id,
+                        "session_missing",
+                        "running task has no session id",
+                        task.launch_token,
+                    )
                 )
                 continue
             if not self.sessions.exists(task.session_id):
                 stale.append(
-                    StaleTask(task.id, "session_missing", f"session not found: {task.session_id}")
+                    StaleTask(
+                        task.id,
+                        "session_missing",
+                        f"session not found: {task.session_id}",
+                        task.launch_token,
+                    )
                 )
                 continue
             if task.heartbeat_at and now - task.heartbeat_at > stale_after:
@@ -144,6 +174,7 @@ class AgentTaskRuntime:
                         task.id,
                         "heartbeat_stale",
                         f"last heartbeat: {task.heartbeat_at.isoformat()}",
+                        task.launch_token,
                     )
                 )
         return stale
@@ -162,6 +193,7 @@ class AgentTaskRuntime:
                         status=TaskStatus.STOPPED,
                         session_id=None,
                         expected_status=expected,
+                        expected_launch_token=item.launch_token,
                         event_kind="sync_stopped",
                         event_payload={"reason": item.reason, "detail": item.detail},
                     )
