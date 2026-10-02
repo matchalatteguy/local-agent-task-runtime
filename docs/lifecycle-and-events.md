@@ -1,74 +1,68 @@
 # Lifecycle and events
 
-Every important state change appends an event. The current task row is optimized for quick inspection; the event stream is optimized for auditability and handoff.
-
-## Common lifecycle
+SQLite stores the current task row and append-only events. Process attempts also
+have durable command, logs, owner and result metadata accessible with `runs ID`.
 
 ```text
 ready -> starting -> running -> done
                        |-----> blocked / stopped / failed
 ```
 
-A stopped or blocked task can be started again by an operator. Done and failed tasks are treated as terminal for normal dispatch.
+Claims reserve STARTING and dispatch capacity atomically. Every attempt gets a
+launch token; state updates check ownership. Process runners own their own
+STARTING-to-RUNNING and final transitions. Generic adapter launch failures restore
+the previous state. A fast completion cannot be overwritten by a launcher.
 
-## Event stream
+Done and failed are terminal for dispatch. `retry ID` explicitly requeues a final
+task and preserves previous attempts. Stopped/blocked tasks can also be started
+directly once all previous process attempts are resolved. Unacknowledged lost
+attempts prevent both retry and start.
 
-Inspect events for one task:
+## Completion and cancellation
 
-```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 events docs-quickstart --json
-```
+Process exit 0 records done, nonzero records failed. Deadline or spawn failure
+records failed with a stable attempt reason. The supervisor drains logs and
+cleans up ordinary process-group children before recording the final result.
+Cancellation writes a token-scoped request; the task remains running until the
+runner finishes cleanup. A cancellation request accepted before exit publication
+wins over normal exit completion. `wait` is an observation call and never cancels.
 
-Events are ordered by SQLite ids and include:
+Tmux/fake tasks require explicit `done` or `stop`. A missing session becomes
+stopped; the runtime does not infer success from its disappearance.
 
-- `task_id`
-- `kind`
-- `payload`
-- `created_at`
-
-Typical event kinds are `registered`, `start_claimed`, `started`, `start_failed`,
-`heartbeat`, `stopped`, `sync_stopped`, `stale`, and `done`. A launch claims the
-task in SQLite before starting external work. A failed launch returns to the
-previous status. A worker that finishes during launch keeps its final state.
-
-## Heartbeats
-
-Heartbeats indicate worker liveness:
+## Events and heartbeat
 
 ```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 heartbeat docs-quickstart
+agent-runtime --db jobs.sqlite3 events report --json
 ```
 
-Long-running workers can call this periodically. A supervising loop can then use `summary`, `sync`, or `tick` to identify stale work.
+Events have an ordered SQLite id, task id, kind, payload and UTC timestamp.
+Consumers must allow additional kinds. Common events:
 
-## Stale and missing sessions
+| Event | Meaning |
+| --- | --- |
+| `registered`, `start_claimed`, `started`, `start_failed` | Registration and attempt launch |
+| `process_finished` | Token, actual exit code, reason and final process state |
+| `cancel_requested` | Requested state and notes for one process attempt |
+| `runner_lost`, `lost_acknowledged` | Lost owner and explicit operator recovery |
+| `retried` | Explicit requeue from a final state |
+| `done`, `stopped`, `sync_stopped` | Tmux/fake completion and reconciliation |
+| `heartbeat`, `stale` | Explicit heartbeat and stale-session finding |
 
-`sync` checks running tasks against the selected session adapter.
+Process heartbeats update timestamps automatically, roughly once per second;
+they do not add an event every second. A heartbeat establishes supervisor activity,
+not that a script is making useful progress. Tmux/fake heartbeats are explicit.
 
-```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 sync
-```
+## Reconciliation
 
-Stable reason codes include:
+`sync`/`tick` use recorded adapter identities. Reason codes are `session_missing`,
+`heartbeat_stale`, `launch_stale`, and `process_runner_missing`.
 
-- `session_missing`: a running task has no live session or no recorded session id.
-- `heartbeat_stale`: the session exists, but the last heartbeat is older than the configured threshold.
-- `launch_stale`: a `starting` task is older than the configured threshold, so
-  its launching supervisor may have exited unexpectedly.
+Missing tmux/fake sessions and old interrupted generic launches become stopped.
+A missing process owner becomes blocked with a lost attempt. Interrupted prepared
+process launches become blocked after the stale threshold; explicit `recover`
+can resolve them sooner. Heartbeat staleness appends an event for inspection,
+without killing the worker. Reconciliation checks the launch token and preserves
+terminal results recorded concurrently.
 
-Missing sessions and stale launches are moved to `stopped` with a `sync_stopped`
-event. This is a finding about liveness, not success or failure. Stale heartbeat
-findings append a `stale` event for operator review. Completion recorded during
-reconciliation is preserved. If a crash created a tmux session before its id was
-recorded, inspect that session before attempting a restart.
-
-## Handoff notes
-
-Use notes to summarize human-readable outcomes:
-
-```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 done docs-quickstart --notes "Updated README and examples."
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 stop docs-quickstart --status blocked --notes "Needs sample input file."
-```
-
-Notes are durable. Do not store secrets, credentials, or private operational details in notes.
+See [recovery](operations-recipes.md#lost-supervisor) before restarting lost work.

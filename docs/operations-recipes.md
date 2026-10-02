@@ -1,70 +1,87 @@
-# Operations recipes
+# Operations
 
-These recipes assume a local runtime store at `.agent-runtime/runtime.sqlite3` and task workspaces under `.agent-runtime/workspaces`.
+The examples assume tasks already registered in `jobs.sqlite3`, with contained
+workspaces under `jobs`. Global path flags precede the command.
 
-## One-shot tick
-
-```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  --workspace-root .agent-runtime/workspaces \
-  tick --max-concurrent 3 --session tmux --json
-```
-
-Run this from cron, a shell loop, or a supervising agent. It reconciles running tasks, dispatches ready tasks up to the cap, and prints a JSON summary.
-
-## Dry-run a backlog without tmux
+## Dispatch a bounded batch
 
 ```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 --workspace-root .agent-runtime/workspaces dispatch --max-concurrent 2 --session fake
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 summary --json
+agent-runtime --db jobs.sqlite3 --workspace-root jobs tick --max-concurrent 3 --session process --timeout 900
+agent-runtime --db jobs.sqlite3 summary --json
 ```
 
-The fake adapter records session state without executing task commands.
+Tick reconciles first and dispatches ready tasks up to the shared cap. It returns
+after launch acknowledgments; it does not wait for workers or generate new tasks.
+A timer can call it again. All dispatchers should use the same cap. Direct `start`
+bypasses dispatch capacity.
 
-## Inspect current state
+## Inspect a failure and retry
 
 ```bash
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 summary --json
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 list --status running --json
-uv run agent-runtime --db .agent-runtime/runtime.sqlite3 events docs-quickstart --json
+agent-runtime --db jobs.sqlite3 show report
+agent-runtime --db jobs.sqlite3 runs report
+agent-runtime --db jobs.sqlite3 logs report --stream stderr
+agent-runtime --db jobs.sqlite3 retry report
+agent-runtime --db jobs.sqlite3 --workspace-root jobs start report --session process --timeout 900
 ```
 
-Use these commands from dashboards, scripts, or supervising agents because they return stable JSON shapes.
+Fix the command's inputs or script before retrying. Artifacts are not rolled back
+or cleared, and retries may repeat side effects. There are no automatic retries.
 
-## Block a task with a note
+## Cancel a process group
 
 ```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  stop docs-quickstart --status blocked --session tmux --notes "Needs a sample Markdown file."
+agent-runtime --db jobs.sqlite3 stop report --status stopped --notes "Cancelled by operator"
+agent-runtime --db jobs.sqlite3 wait report --timeout 10
 ```
 
-Use `blocked` when a worker needs human input. Use `stopped` when the session ended but the task may be resumed. Use `failed` when the task should not be dispatched again without intervention.
+The stop JSON can still say running: cancellation is persisted before cleanup.
+Wait for the final result. TERM has a 0.5-second grace before KILL. The runner
+signals its owned group, never a PID supplied through CLI inspection. Descendants
+that detach into a new session/group escape this scope.
 
-## Record a completion handoff
+## Lost supervisor
+
+A killed supervisor, reboot or control permission failure may leave work running
+without a recoverable owner. `wait` and `sync` detect a missing owner lock, mark
+the task blocked and record `runner_lost`. They never kill historical PIDs, which
+may have been reused. Inspect `runs ID`, raw logs and workspace artifacts. For an
+interrupted STARTING process attempt, use `recover ID` explicitly or wait for the
+stale threshold used by sync.
 
 ```bash
-uv run agent-runtime \
-  --db .agent-runtime/runtime.sqlite3 \
-  done docs-quickstart --session tmux --notes "Updated quickstart and examples."
+agent-runtime --db jobs.sqlite3 recover report
+agent-runtime --db jobs.sqlite3 runs report
 ```
 
-Keep notes concise and public-safe. Do not include credentials or sensitive local context.
+Verify possible orphan work has ended using your normal process tools and the
+command/workspace context; do not blindly signal a PID copied from SQLite. Resolve
+or retain outputs as appropriate. Then explicitly acknowledge your inspection:
 
-## Cron-friendly manager loop
-
-A cron entry can run a tick every minute:
-
-```cron
-* * * * * cd /path/to/project && uv run agent-runtime --db .agent-runtime/runtime.sqlite3 --workspace-root .agent-runtime/workspaces tick --max-concurrent 3 --session tmux --json >> .agent-runtime/tick.log 2>&1
+```bash
+agent-runtime --db jobs.sqlite3 recover report --acknowledge-lost --notes "Inspected orphan work and outputs; no worker remains"
+agent-runtime --db jobs.sqlite3 retry report
+agent-runtime --db jobs.sqlite3 --workspace-root jobs start report --session process
 ```
 
-Use a project-relative path in your own environment. The runtime itself does not require a fixed location.
+The note is required. A live supervisor holding the lock rejects recovery; request
+stop and wait instead. Acknowledgment records operator judgment; it is not proof
+that orphan work was automatically cleaned up.
 
 ## Troubleshooting
 
-- `tmux is not installed or not on PATH`: install tmux or use `--session fake` for dry runs.
-- `workspace path must not contain '..'`: choose a relative path under `--workspace-root`.
-- `workspace path must stay inside the workspace root`: adjust the root or use a contained absolute path.
-- `cannot start task in status ...`: inspect the task with `list --json` and decide whether to stop, unblock, or register a new task.
+| Symptom | Check |
+| --- | --- |
+| Process adapter unavailable | `doctor`; use Linux Python 3.11+ or macOS Python 3.14 with waitid/WNOWAIT |
+| Import error in runner log | Keep the launch interpreter/package installed; install the wheel or use uv's synced environment |
+| Script import fails | Register its own absolute virtual-environment Python executable |
+| No recent output | Use Python `-u`; check stderr and byte truncation counters |
+| Spawn error | Check executable, arguments and workspace permissions in `show` and runner log |
+| Timed out | Worker deadline is `start --timeout`; `wait --timeout` only limits inspection |
+| Unresolved process attempt | Wait/cancel the owner, or follow lost-supervisor inspection above |
+| Workspace escapes root | Choose a contained path; symlink escapes are rejected |
+| Tmux missing | Install tmux or select process/fake; tmux has explicit completion |
+
+Keep database, SQLite WAL/SHM files and sibling `<db>.runs` directory together on
+a local filesystem. Stop runners before moving/backing up/upgrading the store.
+Commands, environment-derived output, notes and event payloads may be sensitive.

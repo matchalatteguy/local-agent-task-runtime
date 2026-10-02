@@ -36,6 +36,7 @@ class FakeSessionManager:
 
     live: set[str] = field(default_factory=set)
     state_path: Path | None = None
+    kind: str = field(default="fake", init=False)
 
     def __post_init__(self) -> None:
         self._load()
@@ -72,6 +73,7 @@ class FakeSessionManager:
 @dataclass(frozen=True)
 class TmuxSessionManager:
     prefix: str = "agent-runtime"
+    kind: str = field(default="tmux", init=False)
 
     def start(self, task_id: str, spec: WorkerSpec) -> str:
         if shutil.which("tmux") is None:

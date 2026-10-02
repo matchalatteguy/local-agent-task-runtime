@@ -7,10 +7,14 @@ Thanks for considering a contribution.
 This project uses Python, `uv`, `pytest`, and `ruff`.
 
 ```bash
-uv sync --group dev
-uv run --group dev ruff check .
-uv run --group dev pytest
+uv sync --locked --python 3.14
+uv run --no-sync ruff check .
+uv run --no-sync pytest
 ```
+
+Process tests require POSIX waitid/WNOWAIT. Use Python 3.14 on macOS; unsupported
+builds skip those tests while retaining fake/tmux coverage. CI exercises Linux
+3.11–3.14 and real macOS 3.14 process behavior.
 
 ## Pull requests
 

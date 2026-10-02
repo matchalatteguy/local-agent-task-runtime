@@ -40,6 +40,8 @@ def test_token_upgrade_preserves_task_and_event(tmp_path, previous_version):
     expected_events = [event.to_dict() for event in store.read_events("old")]
     with sqlite3.connect(db) as conn:
         conn.execute("ALTER TABLE tasks DROP COLUMN launch_token")
+        conn.execute("ALTER TABLE tasks DROP COLUMN session_kind")
+        conn.execute("DROP TABLE process_runs")
         conn.execute(f"PRAGMA user_version = {previous_version}")
     upgraded = SqliteRuntimeStore(db)
     assert upgraded.schema_version() == SCHEMA_VERSION
@@ -76,3 +78,23 @@ def test_limited_events_return_most_recent_events_in_chronological_order(tmp_pat
     events = store.read_events(limit=20)
 
     assert [event.kind for event in events] == [f"note-{index}" for index in range(5, 25)]
+
+
+def test_schema_two_upgrade_preserves_existing_launch_identity(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "runtime.sqlite3"
+    store = SqliteRuntimeStore(db)
+    store.register_task("active", "work", "python worker.py", "active")
+    store.claim_for_start("active")
+    store.update_task("active", status=TaskStatus.RUNNING, session_id="existing-tmux")
+    before = store.get_task("active").to_dict()
+    events = [event.to_dict() for event in store.read_events("active")]
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE process_runs")
+        conn.execute("ALTER TABLE tasks DROP COLUMN session_kind")
+        conn.execute("PRAGMA user_version=2")
+    upgraded = SqliteRuntimeStore(db)
+    assert upgraded.schema_version() == 3
+    assert upgraded.get_task("active").to_dict() == before
+    assert [event.to_dict() for event in upgraded.read_events("active")] == events
