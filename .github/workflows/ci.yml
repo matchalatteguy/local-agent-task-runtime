@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   test:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,4 +43,25 @@ jobs:
           smoke_dir=$(mktemp -d)
           cd "$smoke_dir"
           "$smoke_python" -m local_agent_runtime.demo --output demo
-          "$smoke_python" -m local_agent_runtime.cli --db demo/runtime.sqlite3 events inventory --json
+          "$smoke_python" -m local_agent_runtime.cli --db demo/runtime.sqlite3 runs checks
+
+  macos-process:
+    timeout-minutes: 15
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Verify real macOS process supervision and installed showcase
+        run: |
+          uv sync --locked --python 3.14
+          uv run --no-sync pytest tests/test_process.py tests/test_demo.py tests/test_store.py
+          uv build --no-sources
+          uv venv --python 3.14 .wheel-smoke
+          uv pip install --python .wheel-smoke/bin/python dist/*.whl
+          smoke_python="$PWD/.wheel-smoke/bin/python"
+          smoke_dir=$(mktemp -d)
+          cd "$smoke_dir"
+          "$smoke_python" -m local_agent_runtime.demo --output demo

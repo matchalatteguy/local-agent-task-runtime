@@ -27,7 +27,8 @@ Use directory workspaces for scripts, generated scratch files, read-only checks,
 
 ## Path containment
 
-The runtime rejects relative paths containing `..`. Absolute paths are accepted only when they stay inside the configured workspace root. This prevents accidentally placing task workspaces outside the intended local sandbox.
+The runtime rejects relative paths containing `..`. Absolute paths are accepted only when they stay inside the configured workspace root. This prevents accidentally placing task workspaces outside the configured root.
+Workers still have your account permissions; containment is not a security sandbox.
 
 Good:
 

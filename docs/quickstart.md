@@ -1,58 +1,62 @@
 # Quickstart
 
-Start with the real, portable example from a fresh checkout:
+Process sessions require Linux Python 3.11+ or macOS Python 3.14 with
+`os.waitid`/`WNOWAIT`. Native Windows is unsupported. From a checkout:
 
 ```bash
-uv sync --locked
-uv run python -m local_agent_runtime.demo --output .agent-runtime/demo
+uv sync --locked --python 3.14
+uv run --no-sync agent-runtime doctor
+uv run --no-sync agent-runtime demo --output .agent-runtime/demo
 ```
 
-It executes a Python subprocess that summarizes an inventory CSV. Expect one
-`done` task, an event stream of `registered`, `start_claimed`, `started`,
-`heartbeat`, `done`, and this artifact:
-
-```json
-{"inventory_value": "82.49", "items": 3, "total_units": 18}
-```
-
-The artifact is `.agent-runtime/demo/workspaces/inventory/summary.json`; durable
-state is `.agent-runtime/demo/runtime.sqlite3`. Use a fresh output directory for
-another run. The demo adapter belongs to its supervisor process and does not
-provide detached recovery.
+Expect three done tasks, test attempt exit codes `[1, 0]`, a verified inventory
+value of `82.49`, and a zip at `.agent-runtime/demo/workspaces/build/dist/report.zip`.
+All commands run through detached process supervisors. The failed attempt remains
+in SQLite and its stderr log; a new CLI can inspect it after the launchers exit.
+Use a fresh output directory for another demo.
 
 ```bash
-uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 list --json
-uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 events inventory --json
+uv run --no-sync agent-runtime --db .agent-runtime/demo/runtime.sqlite3 runs checks
+uv run --no-sync agent-runtime --db .agent-runtime/demo/runtime.sqlite3 logs checks --stream stderr
+uv run --no-sync agent-runtime --db .agent-runtime/demo/runtime.sqlite3 events checks --json
 ```
 
-## Try the CLI lifecycle without executing work
+## Command reference
 
-The fake adapter stores simulated session ids. It executes no commands, even if
-the command is runnable. Use a separate database from the real example:
+Global `--db` and `--workspace-root` flags precede the command. Mutations and
+`show`, `runs`, `wait`, `doctor` emit JSON. `list`, `events`, `summary`, `logs`
+support `--json`. `start`/`dispatch`/`tick` select the adapter and accept process
+`--timeout SECONDS` (default 3600) and `--log-limit BYTES` (default 8388608).
+
+| Need | Command |
+| --- | --- |
+| Register / load tasks | `register`, `import backlog.json` |
+| Launch one / fill available capacity | `start ID --session process`, `dispatch --max-concurrent 2 --session process` |
+| Inspect one / attempt history / logs | `show ID`, `runs ID`, `logs ID --stream stderr --attempt TOKEN` |
+| Wait for a result | `wait ID --timeout 30` |
+| Request cancellation | `stop ID --status stopped --notes "cancelled"`, then `wait ID` |
+| Retry a final task | `retry ID`, then `start ID --session process` |
+| Reconcile / reconcile and dispatch | `sync`, `tick --max-concurrent 2 --session process` |
+| Inspect all state / export | `summary --json`, `list --json`, `export --output snapshot.json` |
+| Inspect a lost process runner | `recover ID`; see [recovery](operations-recipes.md#lost-supervisor) |
+
+`wait` exits 0 for done, 1 for another final state, 124 for a waiting deadline,
+and 2 for an invalid request. Waiting never cancels a worker. A ready task is
+returned immediately with exit 1; `wait` does not dispatch it.
+
+Environment defaults are `LOCAL_AGENT_RUNTIME_DB`,
+`LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT` and `LOCAL_AGENT_RUNTIME_SESSION`. Flags
+win. Tmux remains the default; process adapters are recorded per launch.
+
+## Simulate without executing commands
 
 ```bash
-export LOCAL_AGENT_RUNTIME_DB=.agent-runtime/fake.sqlite3
-export LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT=.agent-runtime/workspaces
-export LOCAL_AGENT_RUNTIME_SESSION=fake
-
-uv run agent-runtime init
-uv run agent-runtime register --id practice --role docs --workspace practice --command "printf 'hello'"
-uv run agent-runtime start practice
-uv run agent-runtime heartbeat practice
-uv run agent-runtime done practice --notes "Lifecycle exercise complete."
-uv run agent-runtime events practice --json
+uv run --no-sync agent-runtime --db .agent-runtime/fake.sqlite3 register \
+  --id practice --role docs --workspace practice --command "printf 'hello'"
+uv run --no-sync agent-runtime --db .agent-runtime/fake.sqlite3 start practice --session fake
+uv run --no-sync agent-runtime --db .agent-runtime/fake.sqlite3 done practice --notes "Lifecycle exercise complete."
 ```
 
-The final state is `done`. Explicit `--db`, `--workspace-root`, and `--session`
-flags override the environment defaults. Unset these variables before following
-examples that rely on the default tmux adapter.
-
-## Run detached workers
-
-See the [README detached-worker example](../README.md#start-a-detached-worker)
-for an executable tmux command. A disappearing session is recorded as `stopped`,
-not as success. Record completion after checking its output.
-
-Use `tick --max-concurrent 2 --session tmux` to reconcile sessions and dispatch
-ready work. Read [workspace isolation](workspace-isolation.md) before using git
-worktrees, and [the changelog](../CHANGELOG.md) before opening a 0.1 database.
+The fake adapter executes nothing. For interactive tmux workers and their manual
+completion semantics, read [session managers](session-managers.md). For actual
+scripts with dependencies, use [the background Python guide](background-python.md).

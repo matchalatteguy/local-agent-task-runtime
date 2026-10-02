@@ -1,17 +1,17 @@
 [project]
 name = "local-agent-task-runtime"
-version = "0.2.0"
-description = "A local-first SQLite runtime for coordinating durable agent and script tasks."
+version = "0.3.0"
+description = "Run local background scripts with durable logs, exit codes, cancellation and SQLite state."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "matchalatteguy" }]
-keywords = ["agents", "sqlite", "task-runner", "tmux", "local-first"]
+keywords = ["background-process", "sqlite", "task-runner", "tmux", "subprocess", "logs"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent",
+  "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",

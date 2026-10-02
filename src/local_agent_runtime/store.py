@@ -21,7 +21,7 @@ from .models import (
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SENTINEL = object()
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class TaskStateConflict(ValueError):
@@ -93,6 +93,45 @@ class SqliteRuntimeStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
             if "launch_token" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN launch_token TEXT")
+            if "session_kind" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN session_kind TEXT")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS process_runs (
+                    launch_token TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(id),
+                    session_id TEXT UNIQUE NOT NULL,
+                    argv_json TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    timeout_seconds REAL NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    heartbeat_at TEXT,
+                    supervisor_pid INTEGER,
+                    worker_pid INTEGER,
+                    exit_code INTEGER,
+                    reason TEXT,
+                    cancel_status TEXT,
+                    cancel_notes TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_process_runs_task ON process_runs(task_id)"
+            )
+            run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(process_runs)")}
+            for name, default in (
+                ("log_limit_bytes", 8 * 1024 * 1024),
+                ("stdout_bytes", 0),
+                ("stderr_bytes", 0),
+                ("stdout_discarded", 0),
+                ("stderr_discarded", 0),
+            ):
+                if name not in run_columns:
+                    conn.execute(
+                        f"ALTER TABLE process_runs ADD COLUMN {name} "
+                        f"INTEGER NOT NULL DEFAULT {default}"
+                    )
             if current_version < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -188,6 +227,15 @@ class SqliteRuntimeStore:
             if row is None:
                 raise KeyError(task_id)
             task = self._row_to_task(row)
+            unresolved = conn.execute(
+                "SELECT launch_token FROM process_runs WHERE task_id = ? "
+                "AND state IN ('prepared', 'running', 'lost') LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if unresolved:
+                raise TaskStateConflict(
+                    "task has an unresolved process attempt; stop/wait or recover it first"
+                )
             if task.status not in {TaskStatus.READY, TaskStatus.STOPPED, TaskStatus.BLOCKED}:
                 raise TaskStateConflict(f"cannot start task in status {task.status.value}")
             if max_concurrent is not None:
@@ -204,7 +252,7 @@ class SqliteRuntimeStore:
             conn.execute(
                 "UPDATE tasks SET status = ?, updated_at = ?, session_id = NULL, "
                 "started_at = NULL, completed_at = NULL, heartbeat_at = NULL, "
-                "launch_token = ? WHERE id = ?",
+                "session_kind = NULL, launch_token = ? WHERE id = ?",
                 (TaskStatus.STARTING.value, now, token, task_id),
             )
             self._append_event(
@@ -226,6 +274,7 @@ class SqliteRuntimeStore:
         completed_at: Any = _SENTINEL,
         heartbeat_at: Any = _SENTINEL,
         launch_token: str | None | object = _SENTINEL,
+        session_kind: str | None | object = _SENTINEL,
         event_kind: str | None = None,
         event_payload: dict[str, Any] | None = None,
         expected_status: TaskStatus | None = None,
@@ -246,6 +295,8 @@ class SqliteRuntimeStore:
             values["heartbeat_at"] = heartbeat_at.isoformat() if heartbeat_at else None
         if launch_token is not _SENTINEL:
             values["launch_token"] = launch_token
+        if session_kind is not _SENTINEL:
+            values["session_kind"] = session_kind
         assignments = ", ".join(f"{key} = ?" for key in values)
         params = [*values.values(), task_id]
         with self.connect() as conn:
@@ -281,6 +332,30 @@ class SqliteRuntimeStore:
         self.get_task(task_id)
         with self.connect() as conn:
             return self._append_event(conn, task_id, kind, payload or {})
+
+    def retry_task(self, task_id: str) -> TaskRecord:
+        """Explicitly requeue completed/failed/stopped work; never overlap an unresolved run."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            task = self._row_to_task(row)
+            if task.status in {TaskStatus.RUNNING, TaskStatus.STARTING, TaskStatus.READY}:
+                raise TaskStateConflict(f"cannot retry task in status {task.status.value}")
+            if conn.execute(
+                "SELECT 1 FROM process_runs WHERE task_id=? "
+                "AND state IN ('prepared','running','lost')",
+                (task_id,),
+            ).fetchone():
+                raise TaskStateConflict("unresolved process attempt; recover it first")
+            conn.execute(
+                "UPDATE tasks SET status=?, session_id=NULL, launch_token=NULL, "
+                "session_kind=NULL, updated_at=? WHERE id=?",
+                (TaskStatus.READY.value, utc_now().isoformat(), task_id),
+            )
+            self._append_event(conn, task_id, "retried", {"from": task.status.value})
+        return self.get_task(task_id)
 
     def read_events(self, task_id: str | None = None, limit: int | None = None) -> list[TaskEvent]:
         params: list[Any] = []
@@ -351,6 +426,7 @@ class SqliteRuntimeStore:
             completed_at=parse_dt(row["completed_at"]),
             heartbeat_at=parse_dt(row["heartbeat_at"]),
             launch_token=row["launch_token"],
+            session_kind=row["session_kind"],
         )
 
     @staticmethod

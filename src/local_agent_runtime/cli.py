@@ -11,6 +11,7 @@ from .backlog import export_backlog, load_backlog, register_backlog
 from .config import RuntimeConfig
 from .dispatch import Dispatcher
 from .models import TaskStatus
+from .process import ProcessSessionManager, ProcessStore, require_process_support
 from .store import SqliteRuntimeStore
 
 
@@ -35,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init")
 
     sub.add_parser("doctor")
+    demo = sub.add_parser("demo", help="Run the packaged test/build/verify showcase")
+    demo.add_argument("--output", type=Path, default=Path(".agent-runtime/demo"))
 
     register = sub.add_parser("register")
     register.add_argument("--id", required=True)
@@ -47,9 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("task_id")
     start.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
+    )
+    start.add_argument(
+        "--timeout", type=float, default=None, help="Process deadline in seconds (3600)"
     )
 
     stop = sub.add_parser("stop")
@@ -58,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument("--notes")
     stop.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
     )
@@ -68,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     done.add_argument("--notes")
     done.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
     )
@@ -82,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
     )
@@ -91,10 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--max-concurrent", type=int, default=1)
     dispatch.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
     )
+    dispatch.add_argument("--timeout", type=float, default=None, help="Process deadline in seconds")
 
     tick = sub.add_parser("tick")
     tick.add_argument("--max-concurrent", type=int, default=1)
@@ -103,10 +110,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tick.add_argument(
         "--session",
-        choices=["fake", "tmux"],
+        choices=["fake", "tmux", "process"],
         default=None,
         help="Session adapter (default: LOCAL_AGENT_RUNTIME_SESSION or tmux)",
     )
+    tick.add_argument("--timeout", type=float, default=None, help="Process deadline in seconds")
+
+    for launcher in (start, dispatch, tick):
+        launcher.add_argument(
+            "--log-limit",
+            type=int,
+            default=None,
+            help="Retained bytes per process stdout/stderr log (8388608)",
+        )
+
+    for name in ("show", "runs", "retry"):
+        sub.add_parser(name).add_argument("task_id")
+    wait = sub.add_parser("wait", help="Wait for a result; a wait timeout does not stop the worker")
+    wait.add_argument("task_id")
+    wait.add_argument("--timeout", type=float, default=30)
+    recover = sub.add_parser("recover", help="Record a lost supervisor; never signal stored PIDs")
+    recover.add_argument("task_id")
+    recover.add_argument("--acknowledge-lost", action="store_true")
+    recover.add_argument("--notes")
+    logs = sub.add_parser("logs", help="Read the last lines of a process attempt log")
+    logs.add_argument("task_id")
+    logs.add_argument("--attempt", help="Launch token (default: latest attempt)")
+    logs.add_argument("--stream", choices=["stdout", "stderr", "runner"], default="stdout")
+    logs.add_argument("--lines", type=int, default=50)
+    logs.add_argument("--json", action="store_true")
 
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--status", choices=[status.value for status in TaskStatus])
@@ -135,6 +167,8 @@ def _config(args: argparse.Namespace) -> RuntimeConfig:
         db_path=args.db,
         workspace_root=args.workspace_root,
         session=getattr(args, "session", None),
+        process_timeout_seconds=getattr(args, "timeout", None),
+        process_log_limit_bytes=getattr(args, "log_limit", None),
     )
 
 
@@ -159,18 +193,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command_name == "init":
+        if args.command_name == "demo":
+            from .demo import run_demo
+
+            emit(run_demo(args.output))
+        elif args.command_name == "init":
             store = _store(args)
             emit({"db": str(store.path), "initialized": True})
         elif args.command_name == "doctor":
             config = _config(args)
             store = SqliteRuntimeStore(config.db_path)
+            try:
+                require_process_support()
+                process_support = {"available": True}
+            except RuntimeError as exc:
+                process_support = {"available": False, "detail": str(exc)}
             emit(
                 {
                     "db": str(store.path),
                     "schema_version": store.schema_version(),
                     "session": config.session,
                     "workspace_root": str(config.workspace_root),
+                    "process": process_support,
                 }
             )
         elif args.command_name == "register":
@@ -187,6 +231,57 @@ def main(argv: list[str] | None = None) -> int:
             emit(task.to_dict())
         elif args.command_name == "start":
             emit(_config(args).create_runtime().start_task(args.task_id).to_dict())
+        elif args.command_name == "show":
+            store = _store(args)
+            runs = ProcessStore(store).runs(args.task_id)
+            emit(
+                {
+                    "task": store.get_task(args.task_id).to_dict(),
+                    "latest_run": runs[-1] if runs else None,
+                }
+            )
+        elif args.command_name == "runs":
+            emit(ProcessStore(_store(args)).runs(args.task_id))
+        elif args.command_name == "retry":
+            emit(_store(args).retry_task(args.task_id).to_dict())
+        elif args.command_name == "wait":
+            task = _config(args).create_runtime().wait_task(args.task_id, args.timeout)
+            emit(task.to_dict())
+            return 0 if task.status == TaskStatus.DONE else 1
+        elif args.command_name == "recover":
+            store = _store(args)
+            task = store.get_task(args.task_id)
+            if task.session_kind != "process" or not task.launch_token:
+                raise ValueError("recover requires a process attempt; use sync for tmux/fake")
+            ProcessSessionManager(store.path).recover(
+                task.launch_token, args.acknowledge_lost, args.notes
+            )
+            emit(store.get_task(args.task_id).to_dict())
+        elif args.command_name == "logs":
+            if args.lines < 1 or args.lines > 10000:
+                raise ValueError("--lines must be between 1 and 10000")
+            runs = ProcessStore(_store(args)).runs(args.task_id)
+            run = next(
+                (
+                    run
+                    for run in reversed(runs)
+                    if not args.attempt or run["launch_token"] == args.attempt
+                ),
+                None,
+            )
+            if run is None:
+                raise ValueError("no matching process attempt")
+            path = Path(run["logs"][args.stream])
+            content = ""
+            if path.exists():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 65536))
+                    content = stream.read().decode("utf-8", errors="replace")
+                content = "\n".join(content.splitlines()[-args.lines :])
+            if args.json:
+                emit({"launch_token": run["launch_token"], "path": str(path), "content": content})
+            else:
+                print(content)
         elif args.command_name == "stop":
             emit(
                 _config(args)
@@ -248,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
                 _config(args).create_runtime().summary(stale_after=_stale_after(args.stale_after)),
                 as_json=args.json,
             )
+    except TimeoutError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 124
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

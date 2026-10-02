@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+- Add a detached POSIX process adapter with automatic exit-code completion,
+  per-attempt stdout/stderr logs, heartbeat and inspection after launcher exit.
+- Retain the first 8 MiB per output stream by default; continue draining excess
+  output and persist discarded byte counts. Allow configurable byte caps.
+- Add generation-owned cancellation and deadlines with process-group cleanup.
+  Keep the direct child unreaped until signalling, avoiding PID reuse. Support
+  Linux Python 3.11–3.14 and macOS Python 3.14 with waitid/WNOWAIT. Unsupported
+  builds fail explicitly. Native Windows process sessions are unsupported.
+- Detect a lost supervisor through an exclusive owner lock. Record blocked lost
+  work and require explicit inspection notes before requeueing; never signal a
+  stored PID. Preserve tmux/fake APIs and manual completion semantics.
+- Add show/runs/logs/wait/recover/retry commands, a real isolated test/build/verify
+  showcase, and macOS process fault tests plus installed-wheel smoke checks.
+
+### Upgrading from 0.1 / 0.2
+
+Stop active older supervisors and keep a database backup before upgrading.
+Opening schema 1 or 2 migrates atomically to schema 3, adds nullable
+`session_kind` (and `launch_token` when missing), and creates the process-attempt
+metadata table. Existing task fields and events are preserved; old rows without
+adapter identity use the configured adapter during inspection. Future schema
+versions are rejected before initialization writes. Older package versions
+reject schema 3; downgrade requires the backup.
+
+Task JSON adds `session_kind`; `WorkerSpec` adds an optional launch token used by
+the process adapter. Tmux remains the default. Process completion comes from the
+command's exit code; explicit `done` is rejected for those tasks. Cancellation is
+asynchronous, so wait for cleanup before retrying. Retry records a new event and
+preserves earlier attempts; it does not roll back files or external effects.
+
+
 ## 0.2.0
 
 - Reserve tasks and concurrency slots atomically before launching a worker. The

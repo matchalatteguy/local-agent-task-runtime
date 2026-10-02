@@ -40,6 +40,7 @@ class WorkerSpec:
     cwd: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     session_name: str | None = None
+    launch_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -61,6 +62,7 @@ class TaskRecord:
     completed_at: datetime | None = None
     heartbeat_at: datetime | None = None
     launch_token: str | None = None
+    session_kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +80,7 @@ class TaskRecord:
             "completed_at": to_iso(self.completed_at),
             "heartbeat_at": to_iso(self.heartbeat_at),
             "launch_token": self.launch_token,
+            "session_kind": self.session_kind,
         }
 
 

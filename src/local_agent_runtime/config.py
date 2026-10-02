@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
 
+from .process import DEFAULT_LOG_LIMIT, ProcessSessionManager
 from .runtime import AgentTaskRuntime
 from .sessions import FakeSessionManager, SessionManager, TmuxSessionManager
 from .store import SqliteRuntimeStore
 from .workspaces import DirectoryWorkspaceManager
 
-SessionKind = Literal["fake", "tmux"]
+SessionKind = Literal["fake", "tmux", "process"]
 
 
 @dataclass(frozen=True)
@@ -26,9 +28,11 @@ class RuntimeConfig:
     db_path: Path = Path(".agent-runtime/runtime.sqlite3")
     workspace_root: Path = Path(".")
     session: SessionKind = "tmux"
+    process_timeout_seconds: float = 3600
+    process_log_limit_bytes: int = DEFAULT_LOG_LIMIT
 
     ENV_PREFIX: ClassVar[str] = "LOCAL_AGENT_RUNTIME"
-    VALID_SESSIONS: ClassVar[frozenset[str]] = frozenset({"fake", "tmux"})
+    VALID_SESSIONS: ClassVar[frozenset[str]] = frozenset({"fake", "tmux", "process"})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "db_path", Path(self.db_path))
@@ -36,6 +40,14 @@ class RuntimeConfig:
         if self.session not in self.VALID_SESSIONS:
             allowed = ", ".join(sorted(self.VALID_SESSIONS))
             raise ValueError(f"session must be one of: {allowed}")
+        if not math.isfinite(self.process_timeout_seconds) or self.process_timeout_seconds <= 0:
+            raise ValueError("process timeout must be finite and positive")
+        if (
+            isinstance(self.process_log_limit_bytes, bool)
+            or not isinstance(self.process_log_limit_bytes, int)
+            or self.process_log_limit_bytes < 1
+        ):
+            raise ValueError("log byte limit must be a positive integer")
 
     @classmethod
     def from_env(
@@ -45,6 +57,8 @@ class RuntimeConfig:
         workspace_root: str | Path | None = None,
         session: str | None = None,
         environ: dict[str, str] | None = None,
+        process_timeout_seconds: float | None = None,
+        process_log_limit_bytes: int | None = None,
     ) -> RuntimeConfig:
         """Create config from explicit values with environment fallback.
 
@@ -66,6 +80,12 @@ class RuntimeConfig:
                 workspace_root or env.get(f"{cls.ENV_PREFIX}_WORKSPACE_ROOT") or "."
             ),
             session=resolved_session,  # type: ignore[arg-type]
+            process_timeout_seconds=3600
+            if process_timeout_seconds is None
+            else process_timeout_seconds,
+            process_log_limit_bytes=(
+                DEFAULT_LOG_LIMIT if process_log_limit_bytes is None else process_log_limit_bytes
+            ),
         )
 
     def create_session_manager(self) -> SessionManager:
@@ -73,6 +93,10 @@ class RuntimeConfig:
 
         if self.session == "fake":
             return FakeSessionManager(state_path=Path(str(self.db_path) + ".fake-sessions.json"))
+        if self.session == "process":
+            return ProcessSessionManager(
+                self.db_path, self.process_timeout_seconds, self.process_log_limit_bytes
+            )
         return TmuxSessionManager()
 
     def create_runtime(self) -> AgentTaskRuntime:

@@ -2,157 +2,168 @@
 
 [![CI](https://github.com/matchalatteguy/local-agent-task-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/matchalatteguy/local-agent-task-runtime/actions/workflows/ci.yml)
 
-Coordinate local workers with a durable SQLite task record, an append-only event
-log, contained workspaces, and detached tmux sessions. Inspect a task after your
-supervisor exits, reconcile a lost session, and leave a completion note that the
-next operator can read.
+Run Python scripts in the background with logs and exit codes. Close the launching
+terminal, reopen the CLI, and inspect the result in SQLite. The process adapter
+collects completion automatically, retains bounded stdout/stderr logs, and
+cancels an owned process group on request or deadline. No service or runtime
+dependency is required.
 
-**This project manages the lifecycle of tasks you register.** Its sibling
-[Agent Backlog Runner](https://github.com/matchalatteguy/agent-backlog-runner)
-creates tasks from a template catalog and runs short commands synchronously.
-Choose this runtime when workers need independent sessions, heartbeat tracking,
-or separate workspaces. Neither project is a distributed workflow engine.
+**Platform:** Linux Python 3.11–3.14; macOS Python **3.14** for process sessions.
+Your interpreter must expose POSIX `waitid`/`WNOWAIT`; `doctor` reports whether it
+does. Tmux and fake adapters remain available on Python 3.11+. Native Windows
+process sessions are unsupported.
 
-## Run a real example
+## Try it
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). From a fresh checkout:
+Install the tagged source with [uv](https://docs.astral.sh/uv/) (no PyPI release):
 
 ```bash
-uv sync --locked
-uv run python -m local_agent_runtime.demo --output .agent-runtime/demo
+uv tool install --python 3.14 'git+https://github.com/matchalatteguy/local-agent-task-runtime.git@v0.3.0'
+agent-runtime doctor
+agent-runtime demo --output runtime-demo
 ```
 
-The example launches a **real Python subprocess**, reads a three-row inventory
-CSV, and writes an inventory summary. The supervisor records the lifecycle and
-reopens SQLite before reporting the result. Expected output:
+The packaged showcase creates three separate workspaces, runs a deliberately
+failing unit test, fixes the sample code, retries it, builds a zip artifact, and
+verifies that artifact in another worker. Each launcher exits before the result
+is inspected. No tmux or test dependency is required. Expected JSON, ignoring
+whitespace:
 
 ```json
 {
-  "counts": {"done": 1},
-  "events": ["registered", "start_claimed", "started", "heartbeat", "done"],
-  "summary": {"inventory_value": "82.49", "items": 3, "total_units": 18}
+  "artifact": "workspaces/build/dist/report.zip",
+  "checks_attempt_exit_codes": [1, 0],
+  "counts": {"done": 3},
+  "restored_states": {"build": "done", "checks": "done", "verify": "done"},
+  "verified_summary": {"inventory_value": "82.49", "items": 3, "total_units": 18}
 }
 ```
 
-Whitespace in the printed JSON differs. Inspect the output at
-`.agent-runtime/demo/workspaces/inventory/summary.json`. The SQLite record lives
-at `.agent-runtime/demo/runtime.sqlite3`. Use a new `--output` path for another
-run; the demo refuses to overwrite an existing directory.
+Inspect the preserved failure and successful retry:
 
 ```bash
-uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 list --json
-uv run agent-runtime --db .agent-runtime/demo/runtime.sqlite3 events inventory --json
+agent-runtime --db runtime-demo/runtime.sqlite3 runs checks
+agent-runtime --db runtime-demo/runtime.sqlite3 logs checks --stream stderr
+agent-runtime --db runtime-demo/runtime.sqlite3 show verify
 ```
 
-The demo adapter stays inside one supervisor process. It shows actual execution
-without requiring tmux; it does not provide detached process recovery.
+`runs` lists both attempts, their exit codes, truncation counts and log paths.
+Use `logs --attempt LAUNCH_TOKEN --stream stderr` for the first failure. The zip
+is `runtime-demo/workspaces/build/dist/report.zip`. A repeat demo requires a fresh
+output directory; it refuses to overwrite existing work.
 
-## Start a detached worker
+From a checkout, use `uv sync --locked --python 3.14`, then prefix the commands
+above with `uv run --no-sync`.
 
-Install `tmux` for Linux, macOS, or WSL. This runnable example writes a file in its
-workspace and leaves the session open for inspection:
+## Run your own script
+
+Commands for process sessions are split into an argument vector using POSIX
+quoting. There is no implicit shell expansion. This complete example runs in a
+contained workspace and writes an artifact:
 
 ```bash
-uv run agent-runtime --db .agent-runtime/worker.sqlite3 --workspace-root .agent-runtime/workspaces register \
-  --id hello --role docs --workspace hello \
-  --command "printf 'worker finished\\n' > result.txt; sleep 600"
-
-uv run agent-runtime --db .agent-runtime/worker.sqlite3 --workspace-root .agent-runtime/workspaces start hello --session tmux
-uv run agent-runtime --db .agent-runtime/worker.sqlite3 heartbeat hello
-cat .agent-runtime/workspaces/hello/result.txt
-uv run agent-runtime --db .agent-runtime/worker.sqlite3 done hello --session tmux --notes "result.txt written and checked."
+agent-runtime --db jobs.sqlite3 --workspace-root jobs register \
+  --id hello --role report --workspace hello \
+  --command "python3 -u -c 'import time; from pathlib import Path; time.sleep(2); Path(\"result.txt\").write_text(\"finished\\n\"); print(\"artifact ready\")'"
+agent-runtime --db jobs.sqlite3 --workspace-root jobs start hello --session process --timeout 60
+agent-runtime --db jobs.sqlite3 wait hello --timeout 10
+agent-runtime --db jobs.sqlite3 logs hello
+cat jobs/hello/result.txt
 ```
 
-The file contains `worker finished`. `done` persists the note and stops the
-session. To watch a live worker, copy `session_id` from the `start` JSON result
-into `tmux attach-session -t =SESSION_ID`. Each attempt receives a unique name
-such as `agent-runtime-hello-<launch-token>`.
-Commands passed to tmux are shell commands: use trusted commands.
+`wait` returns `done`, `logs` prints `artifact ready`, and the artifact contains
+`finished`. `start` returns after the detached supervisor acknowledges ownership;
+it may already return a terminal state for a fast command. The launching CLI can
+exit immediately. `wait` exit codes are **0** for done, **1** for any other final
+state, **124** if inspection times out (the worker continues), and **2** for an
+invalid request.
 
-A session disappearing does **not** establish success. `sync` moves a missing
-session to `stopped`; the supervisor or worker must explicitly record `done` or
-`failed` after checking its result. Heartbeats are explicit too.
+Use the absolute Python executable from your worker's virtual environment for a
+script with dependencies. See [the script guide](docs/background-python.md).
 
-## Lifecycle and concurrency
-
-```text
-ready -> starting -> running -> done
-                       |-----> blocked / stopped / failed
-```
-
-- Task and capacity reservations are atomic SQLite transactions. Two local
-  dispatchers cannot claim the same task or exceed their shared concurrency cap
-  when they use the same cap. Direct `start` is an explicit manual override of
-  dispatch capacity.
-- `starting` reserves capacity while a workspace and session are prepared. Failed
-  launches restore the prior status; interrupted launches remain inspectable and
-  become `stopped` after the stale threshold.
-- `sync` preserves terminal states recorded while reconciliation is in progress.
-  A fast worker's completion cannot be overwritten by the launch finishing.
-  Launch-token checks prevent an old attempt from overwriting or stopping a
-  replacement after an operator stops and restarts the task.
-- Relative and absolute workspace paths must remain under the configured root,
-  including when a path passes through a symlink. Directory containment is path
-  validation, not an execution sandbox.
-
-Use one tick in a manager loop:
+For a task that is still running, substitute its id for `TASK_ID`:
 
 ```bash
-uv run agent-runtime --db .agent-runtime/worker.sqlite3 --workspace-root .agent-runtime/workspaces tick --max-concurrent 3 --session tmux
+agent-runtime --db jobs.sqlite3 stop TASK_ID --status stopped --notes "No longer needed"
+agent-runtime --db jobs.sqlite3 wait TASK_ID
+agent-runtime --db jobs.sqlite3 retry TASK_ID
+agent-runtime --db jobs.sqlite3 --workspace-root jobs start TASK_ID --session process
 ```
 
-Choose unique task ids for workers. Each launch has its own session name. If a
-crash leaves an unrecorded session behind, inspect it before restarting the task.
-The adapter refuses to silently reuse an explicitly requested existing session.
+Cancellation is a durable request; the task becomes final after group cleanup.
+Retry is explicit and preserves previous attempts. `done` is for tmux/fake tasks;
+process completion comes from the exit code.
 
-## CLI and Python API
+## Guarantees and limits
 
-| Operation | Commands |
-| --- | --- |
-| Create tasks | `register`, JSON `import` |
-| Operate workers | `start`, `dispatch`, `tick`, `heartbeat`, `sync`, `stop`, `done` |
-| Inspect state | `list`, `summary`, `events`, `doctor`, `export` |
+- SQLite transactions claim tasks and reserve concurrency slots. Dispatchers
+  sharing a database must use the same cap; direct `start` bypasses that cap.
+- Each attempt has a unique token, owner lock, logs and result. An old runner
+  cannot record completion for a newer attempt. CLI commands never signal PIDs
+  read from the database.
+- The supervisor keeps its direct child unreaped until process-group cleanup,
+  preventing PID reuse during signalling. Timeout and cancellation send TERM,
+  allow 0.5 seconds, then KILL. Normal command exit also cleans up group members.
+  Descendants that deliberately create another session/group escape this scope.
+- Stdout and stderr each retain their **first 8 MiB** by default; excess output
+  is drained and counted. `start --log-limit BYTES` changes that limit. Logs are
+  raw bytes; `logs` decodes UTF-8 with replacement and reads at most the final
+  64 KiB of retained data. Python workers should use `-u` for timely output.
+- SIGTERM/SIGINT of the supervisor request cleanup. SIGKILL, reboot, or a control
+  permission failure can leave orphan work. `wait`/`sync` record a missing runner
+  as **blocked**. Restart remains blocked until explicit acknowledgment after
+  inspection. [Recovery instructions](docs/operations-recipes.md#lost-supervisor).
 
-Inspection supports `--json`; mutations emit JSON. `--db` and `--workspace-root`
-precede the command. Environment defaults are `LOCAL_AGENT_RUNTIME_DB`,
-`LOCAL_AGENT_RUNTIME_WORKSPACE_ROOT`, and `LOCAL_AGENT_RUNTIME_SESSION`; explicit
-flags override them. `--session fake` records simulated sessions and executes no
-commands.
+This is a single-machine alpha tool, with no automatic retries, dependency DAG,
+remote execution, exactly-once execution or security sandbox. Store the database
+and its `.runs` directory together on a local filesystem; keep the interpreter
+and package used by active runners installed. Workspace containment validates
+paths, but workers can access files your account can access.
+
+## Other adapters and APIs
+
+| Adapter | Execution | Completion | Primary use |
+| --- | --- | --- | --- |
+| `process` | Detached owned subprocess group | Automatic exit code, logs, heartbeat | Scripts, tests, builds |
+| `tmux` | Detached shell session | Explicit `done` / `stop`; lost session means stopped | Interactive workers |
+| `fake` | No command execution | Explicit lifecycle calls | Integration tests / dry runs |
+
+Tmux is the default for backward compatibility. Recorded adapter identities route
+later inspection and cancellation; you do not need to repeat `--session process`.
+Legacy rows without an identity use the selected adapter. See [session details](docs/session-managers.md).
+
+The sibling [Agent Backlog Runner](https://github.com/matchalatteguy/agent-backlog-runner)
+replenishes a queue from templates and executes short commands synchronously.
+This runtime operates registered tasks whose workers outlive the launching call.
 
 ```python
-from local_agent_runtime import AgentTaskRuntime, FakeSessionManager
+from pathlib import Path
+from local_agent_runtime import RuntimeConfig
 
-runtime = AgentTaskRuntime.local(
-    ".agent-runtime/example.sqlite3", FakeSessionManager(), ".agent-runtime/workspaces"
-)
-runtime.register_task("docs", "docs", "python write_docs.py", "docs")
-runtime.start_task("docs")  # simulated session in this example
-runtime.mark_done("docs", notes="Reviewed the proposed documentation.")
-print(runtime.store.get_task("docs").to_dict())
+runtime = RuntimeConfig(
+    db_path=Path("jobs.sqlite3"), workspace_root=Path("jobs"), session="process",
+    process_timeout_seconds=60, process_log_limit_bytes=1024 * 1024,
+).create_runtime()
+runtime.register_task("report", "data", "/absolute/path/.venv/bin/python -u report.py", "report")
+runtime.start_task("report")
+result = runtime.wait_task("report", timeout_seconds=30)
+print(result.status, result.notes)
 ```
 
-Replace the adapter with `TmuxSessionManager` for detached workers.
-`GitWorktreeWorkspaceManager` is available through the library when code-editing
-workers need separate checkouts.
+[CLI quickstart](docs/quickstart.md) · [Lifecycle](docs/lifecycle-and-events.md) ·
+[Workspace isolation](docs/workspace-isolation.md) · [Operations](docs/operations-recipes.md)
 
-## Verification and boundaries
+## Development and upgrades
 
 ```bash
-uv run pytest
-uv run ruff check .
-uv build
+uv sync --locked --python 3.14
+uv run --no-sync ruff check .
+uv run --no-sync pytest
+uv build --no-sources
 ```
 
-CI tests Python 3.11–3.14, exercises a real tmux worker, and runs the example from
-an installed wheel outside the checkout. See [CHANGELOG.md](CHANGELOG.md) before
-upgrading a 0.1 database: 0.2 introduces schema version 2 and the `starting` state.
-
-This is an alpha library for one machine. It provides no exactly-once execution,
-automatic retries, exit-code collection for arbitrary tmux commands, multi-host
-leases, secret storage, or process sandbox. A crash between external session
-creation and SQLite recording can require operator reconciliation. Commands,
-notes, and event payloads are stored verbatim; protect the database accordingly.
-
-[Quickstart](docs/quickstart.md) · [Sessions](docs/session-managers.md) ·
-[Workspaces](docs/workspace-isolation.md) · [Lifecycle](docs/lifecycle-and-events.md) ·
-[Operations](docs/operations-recipes.md)
+CI tests Linux Python 3.11–3.14, real tmux sessions, macOS Python 3.14 process
+ownership and crash recovery, and the showcase from an installed wheel outside
+the checkout. See [CHANGELOG.md](CHANGELOG.md): v0.3 upgrades schema 1/2 databases
+transactionally to schema 3, preserving task fields and events. Stop old runners
+and back up the database before upgrading; older versions reject schema 3.

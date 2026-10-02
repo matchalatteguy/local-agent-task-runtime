@@ -75,7 +75,8 @@ uv run agent-runtime \
 uv run agent-runtime --db .agent-runtime/runtime.sqlite3 summary --json
 ```
 
-To run one task for real after the fake exercise, use a separate database and the tmux adapter:
+To run one task for real after the fake exercise, use a separate database and the process adapter
+(Linux Python 3.11+ or macOS Python 3.14 with waitid/WNOWAIT):
 
 ```bash
 uv run agent-runtime \
@@ -83,17 +84,19 @@ uv run agent-runtime \
 
 uv run agent-runtime \
   --db .agent-runtime/real.sqlite3 --workspace-root . \
-  start docs-quickstart --session tmux
+  start docs-quickstart --session process
 ```
 
 The command writes `workspaces/docs-quickstart/quickstart-notes.md`.
 
-The short worker exits after writing the file. Verify that output, then record
-completion explicitly:
+The process supervisor collects completion automatically. Inspect the result:
 
 ```bash
+uv run agent-runtime --db .agent-runtime/real.sqlite3 wait docs-quickstart
 cat workspaces/docs-quickstart/quickstart-notes.md
-uv run agent-runtime --db .agent-runtime/real.sqlite3 done docs-quickstart --session tmux --notes "quickstart-notes.md verified."
+uv run agent-runtime --db .agent-runtime/real.sqlite3 runs docs-quickstart
 ```
 
-A closed session alone does not establish a successful result.
+Expect done and exit code 0. The failed command's stderr would remain available
+with `logs docs-quickstart --stream stderr`. Tmux remains available for interactive
+workers that explicitly record completion; see the session-manager guide.
